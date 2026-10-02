@@ -1,5 +1,5 @@
-CREATE DATABASE IF NOT EXISTS `amlo_dashboard` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
-USE `amlo_dashboard`;
+CREATE DATABASE IF NOT EXISTS `DashboardRAC` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
+USE `DashboardRAC`;
 
 CREATE TABLE IF NOT EXISTS `str_alerts` (
     `id` INT AUTO_INCREMENT PRIMARY KEY,

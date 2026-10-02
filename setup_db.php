@@ -10,7 +10,7 @@ try {
     $stmt = $pdo->query("SELECT COUNT(*) AS total FROM str_alerts");
     $count = (int)$stmt->fetchColumn();
 
-    $message = "Database `amlo_dashboard` dan tabel `str_alerts` berhasil disiapkan. Total records: {$count}.";
+    $message = "Database `" . DB_NAME . "` dan tabel `str_alerts` berhasil disiapkan. Total records: {$count}.";
     $success = true;
 } catch (Throwable $e) {
     $message = "Gagal inisialisasi database: " . $e->getMessage();
