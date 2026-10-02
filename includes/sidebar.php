@@ -60,8 +60,8 @@ $currentScript = basename($_SERVER['SCRIPT_NAME'] ?? '');
 
             <li>
                 <a
-                    href="pengkinian_data.php"
-                    class="nav-link <?= $currentScript === 'pengkinian_data.php' ? 'active' : '' ?>"
+                    href="Pengkinian_data.php"
+                    class="nav-link <?= in_array(strtolower($currentScript), ['pengkinian_data.php', 'import-pengkinian-data.php'], true) ? 'active' : '' ?>"
                 >
                     Pengkinian Data
                 </a>
@@ -70,7 +70,7 @@ $currentScript = basename($_SERVER['SCRIPT_NAME'] ?? '');
             <li>
                 <a
                     href="uji-petik.php"
-                    class="nav-link <?= $currentScript === 'uji-petik.php' ? 'active' : '' ?>"
+                    class="nav-link <?= in_array($currentScript, ['uji-petik.php', 'import-uji-petik.php'], true) ? 'active' : '' ?>"
                 >
                     Uji Petik
                 </a>
@@ -79,7 +79,7 @@ $currentScript = basename($_SERVER['SCRIPT_NAME'] ?? '');
             <li>
                 <a
                     href="nilai-maturitas.php"
-                    class="nav-link <?= $currentScript === 'nilai-maturitas.php' ? 'active' : '' ?>"
+                    class="nav-link <?= in_array($currentScript, ['nilai-maturitas.php', 'import-nilai-maturitas.php'], true) ? 'active' : '' ?>"
                 >
                     Nilai Maturitas
                 </a>
@@ -88,7 +88,7 @@ $currentScript = basename($_SERVER['SCRIPT_NAME'] ?? '');
             <li>
                 <a
                     href="penilaian-resiko.php"
-                    class="nav-link <?= $currentScript === 'penilaian-resiko.php' ? 'active' : '' ?>"
+                    class="nav-link <?= in_array($currentScript, ['penilaian-resiko.php', 'import-penilaian-resiko.php'], true) ? 'active' : '' ?>"
                 >
                     Penilaian Resiko
                 </a>
@@ -103,7 +103,24 @@ $currentScript = basename($_SERVER['SCRIPT_NAME'] ?? '');
                 </a>
             </li>
 
+            <li style="margin-top:14px;padding-top:14px;border-top:1px solid #f1f5f9;">
+                <a
+                    href="import-batch.php"
+                    class="nav-link <?= $currentScript === 'import-batch.php' ? 'active' : '' ?>"
+                    style="display:flex;align-items:center;justify-content:space-between;"
+                >
+                    <span style="display:flex;align-items:center;gap:6px;">
+                        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                            <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path>
+                        </svg>
+                        Import Folder / ZIP
+                    </span>
+                    <span style="background:#0284c7;color:#ffffff;font-size:10px;font-weight:700;padding:2px 6px;border-radius:4px;text-transform:uppercase;letter-spacing:0.5px;">Batch</span>
+                </a>
+            </li>
+
         </ul>
     </nav>
+
 
 </aside>

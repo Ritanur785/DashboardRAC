@@ -27,11 +27,37 @@ function normalizeHeader(mixed $value): string {
     return strtolower($value ?? '');
 }
 
+function stripAlphanumeric(mixed $value): string {
+    return preg_replace('/[^a-z0-9]/', '', strtolower(trim((string)$value)));
+}
+
 function findColumnIndex(array $headers, array $possibleNames): ?int {
+    // 1. Exact normalized match
     foreach ($possibleNames as $possibleName) {
         $normalizedTarget = normalizeHeader($possibleName);
         foreach ($headers as $index => $header) {
             if (normalizeHeader($header) === $normalizedTarget) {
+                return (int)$index;
+            }
+        }
+    }
+    // 2. Alphanumeric stripped exact match
+    foreach ($possibleNames as $possibleName) {
+        $stripTarget = stripAlphanumeric($possibleName);
+        if ($stripTarget === '') continue;
+        foreach ($headers as $index => $header) {
+            if (stripAlphanumeric($header) === $stripTarget) {
+                return (int)$index;
+            }
+        }
+    }
+    // 3. Substring / contains match
+    foreach ($possibleNames as $possibleName) {
+        $stripTarget = stripAlphanumeric($possibleName);
+        if (strlen($stripTarget) < 3) continue;
+        foreach ($headers as $index => $header) {
+            $hStrip = stripAlphanumeric($header);
+            if (str_contains($hStrip, $stripTarget)) {
                 return (int)$index;
             }
         }
@@ -95,7 +121,7 @@ function parseDelimitedText(string $content, ?string $delimiter = null): array {
 }
 
 // Built-in parser for XLSX files without requiring Composer/phpspreadsheet
-function parseXlsxFile(string $filePath): array {
+function parseXlsxFile(string $filePath, array $preferredSheetNames = ['bad data', 'baddata', 'bad_data', 'bad']): array {
     $zip = new ZipArchive();
     $openResult = $zip->open($filePath, ZipArchive::RDONLY);
     if ($openResult !== true) {
@@ -126,33 +152,101 @@ function parseXlsxFile(string $filePath): array {
         }
     }
 
-    $sheetXml = false;
-    $candidates = ['xl/worksheets/sheet1.xml', 'xl/worksheets/Sheet1.xml', 'xl/worksheets/sheet.xml'];
-    foreach ($candidates as $candidate) {
-        $sheetXml = $zip->getFromName($candidate);
-        if ($sheetXml !== false) {
-            break;
+    // Map sheet names to sheet XML targets using workbook.xml and workbook.xml.rels
+    $sheetMap = [];
+    $wbXmlStr = $zip->getFromName('xl/workbook.xml');
+    $relsXmlStr = $zip->getFromName('xl/_rels/workbook.xml.rels');
+
+    if ($wbXmlStr !== false && $relsXmlStr !== false) {
+        $wbXml = simplexml_load_string($wbXmlStr);
+        $relsXml = simplexml_load_string($relsXmlStr);
+
+        $relIdToTarget = [];
+        if ($relsXml && isset($relsXml->Relationship)) {
+            foreach ($relsXml->Relationship as $rel) {
+                $id = (string)$rel['Id'];
+                $target = (string)$rel['Target'];
+                if (!str_starts_with($target, 'xl/')) {
+                    $target = 'xl/' . ltrim($target, '/');
+                }
+                $relIdToTarget[$id] = $target;
+            }
+        }
+
+        if ($wbXml && isset($wbXml->sheets->sheet)) {
+            foreach ($wbXml->sheets->sheet as $s) {
+                $name = trim((string)$s['name']);
+                $rId = (string)$s->attributes('http://schemas.openxmlformats.org/officeDocument/2006/relationships')['id'];
+                if (isset($relIdToTarget[$rId])) {
+                    $sheetMap[$name] = $relIdToTarget[$rId];
+                }
+            }
         }
     }
 
-    if ($sheetXml === false) {
-        for ($i = 0; $i < $zip->numFiles; $i++) {
-            $entry = $zip->getNameIndex($i);
-            if (preg_match('#^xl/worksheets/.*\.xml$#i', $entry)) {
-                $sheetXml = $zip->getFromIndex($i);
+    // Select the best worksheet
+    $selectedSheetPath = null;
+    if (!empty($preferredSheetNames) && !empty($sheetMap)) {
+        foreach ($preferredSheetNames as $pref) {
+            $prefLower = strtolower(trim($pref));
+            foreach ($sheetMap as $sName => $sPath) {
+                if (strtolower(trim($sName)) === $prefLower) {
+                    $selectedSheetPath = $sPath;
+                    break 2;
+                }
+            }
+        }
+        if (!$selectedSheetPath) {
+            foreach ($preferredSheetNames as $pref) {
+                $prefLower = strtolower(trim($pref));
+                foreach ($sheetMap as $sName => $sPath) {
+                    $sNameLower = strtolower(trim($sName));
+                    if (str_contains($sNameLower, $prefLower) || str_contains($prefLower, $sNameLower)) {
+                        $selectedSheetPath = $sPath;
+                        break 2;
+                    }
+                }
+            }
+        }
+    }
+
+    if (!$selectedSheetPath && !empty($sheetMap)) {
+        $selectedSheetPath = reset($sheetMap);
+    }
+
+    if (!$selectedSheetPath) {
+        $candidates = ['xl/worksheets/sheet1.xml', 'xl/worksheets/Sheet1.xml', 'xl/worksheets/sheet.xml'];
+        foreach ($candidates as $candidate) {
+            if ($zip->locateName($candidate) !== false) {
+                $selectedSheetPath = $candidate;
                 break;
             }
         }
     }
 
-    if ($sheetXml === false) {
+    if (!$selectedSheetPath) {
+        for ($i = 0; $i < $zip->numFiles; $i++) {
+            $entry = $zip->getNameIndex($i);
+            if (preg_match('#^xl/worksheets/.*\.xml$#i', $entry)) {
+                $selectedSheetPath = $entry;
+                break;
+            }
+        }
+    }
+
+    if (!$selectedSheetPath) {
         $zip->close();
         throw new RuntimeException('Worksheet tidak ditemukan dalam file Excel.');
     }
 
-    $xml = simplexml_load_string($sheetXml);
+    $sheetXmlStr = $zip->getFromName($selectedSheetPath);
     $zip->close();
 
+    if ($sheetXmlStr === false) {
+        throw new RuntimeException("Gagal membaca worksheet: {$selectedSheetPath}");
+    }
+
+    $xml = simplexml_load_string($sheetXmlStr);
     if (!$xml || !isset($xml->sheetData->row)) {
         return [];
     }
@@ -178,7 +272,7 @@ function parseXlsxFile(string $filePath): array {
                 $lastColIdx++;
             }
 
-            $type = (string)$cell['t'];
+            $type = (string)($cell['t'] ?? '');
             $val = isset($cell->v) ? (string)$cell->v : '';
 
             if ($type === 's' && is_numeric($val) && isset($sharedStrings[(int)$val])) {
@@ -187,7 +281,7 @@ function parseXlsxFile(string $filePath): array {
                 $val = (string)$cell->is->t;
             }
 
-            $row[] = trim($val);
+            $row[] = trim((string)$val);
             $lastColIdx = $colIdx;
         }
 
@@ -199,49 +293,143 @@ function parseXlsxFile(string $filePath): array {
     return $rows;
 }
 
-function detectFormatMode(array $header): string {
-    $headerStr = strtolower(implode(' ', array_map('strval', $header)));
-    if (
-        str_contains($headerStr, 'branch office') ||
-        str_contains($headerStr, 'perbaikan bad data') ||
-        str_contains($headerStr, 'bad data baru') ||
-        count($header) >= 14
-    ) {
-        return 'comparison_17';
-    }
-    return 'standard_7';
-}
-
-function getBadDataColumnMap(array $header): array {
-    $mode = detectFormatMode($header);
-
-    if ($mode === 'comparison_17') {
-        return [
-            'mode' => 'comparison_17',
-            'raw_header' => $header
-        ];
+function resolveBadDataHeadersAndRows(array $allRows): array {
+    if (empty($allRows)) {
+        return [[], []];
     }
 
-    $map = [
-        'mode'       => 'standard_7',
-        'branch'     => findColumnIndex($header, ['branch', 'nama branch', 'cabang']),
-        'pic_rac'    => findColumnIndex($header, ['pic rac', 'pic_rac', 'pic']),
-        'persentase' => findColumnIndex($header, ['%bad data', '% bad data', 'bad data', 'persentase', 'persentase bad data', '% bad_data']),
-        'average'    => findColumnIndex($header, ['avarage', 'average', 'rata-rata', 'avg']),
-        'status'     => findColumnIndex($header, ['status']),
-        'month'      => findColumnIndex($header, ['posisi bulan', 'bulan', 'month', 'periode', 'posisi']),
-        'region'     => findColumnIndex($header, ['region', 'wilayah', 'kanwil', 'ro'])
+    $headerKeywords = [
+        'branch', 'cabang', 'kantor cabang', 'unit kerja', 'branch office', 'uker',
+        'pic rac', 'pic_rac', 'pic', 'disposisi rac', 'nama pic', 'disposisi', 'rac',
+        '%bad data', '% bad data', 'bad data', 'persentase', 'average', 'rata-rata', 'no', 'cif'
     ];
 
-    $missing = [];
-    foreach (['branch', 'pic_rac', 'persentase'] as $req) {
-        if ($map[$req] === null) {
-            $missing[] = strtoupper($req);
+    $headerRowIdx = 0;
+    $maxMatches = 0;
+    $scanLimit = min(10, count($allRows));
+
+    for ($i = 0; $i < $scanLimit; $i++) {
+        $row = $allRows[$i];
+        if (!is_array($row) || empty($row)) {
+            continue;
+        }
+        $matches = 0;
+        foreach ($row as $cell) {
+            $cellStr = stripAlphanumeric($cell);
+            if ($cellStr === '') {
+                continue;
+            }
+            foreach ($headerKeywords as $kw) {
+                if (str_contains($cellStr, stripAlphanumeric($kw))) {
+                    $matches++;
+                    break;
+                }
+            }
+        }
+        if ($matches > $maxMatches) {
+            $maxMatches = $matches;
+            $headerRowIdx = $i;
         }
     }
 
-    if (!empty($missing)) {
-        throw new RuntimeException('Kolom tidak sesuai. Kolom wajib: ' . implode(', ', $missing));
+    $dataStartIdx = $headerRowIdx + 1;
+
+    // Check if subsequent 1 or 2 rows are continuation of multi-tier headers (common in consolidation reports)
+    if ($headerRowIdx + 1 < count($allRows)) {
+        $nextRow = $allRows[$headerRowIdx + 1];
+        $nextMatches = 0;
+        foreach ($nextRow as $cell) {
+            $cellStr = stripAlphanumeric($cell);
+            if ($cellStr === '') {
+                continue;
+            }
+            foreach ($headerKeywords as $kw) {
+                if (str_contains($cellStr, stripAlphanumeric($kw))) {
+                    $nextMatches++;
+                    break;
+                }
+            }
+        }
+        if ($nextMatches >= 2) {
+            $dataStartIdx = $headerRowIdx + 2;
+            if ($headerRowIdx + 2 < count($allRows)) {
+                $row2 = $allRows[$headerRowIdx + 2];
+                $r2Matches = 0;
+                foreach ($row2 as $cell) {
+                    $cellStr = stripAlphanumeric($cell);
+                    if ($cellStr === '') {
+                        continue;
+                    }
+                    foreach ($headerKeywords as $kw) {
+                        if (str_contains($cellStr, stripAlphanumeric($kw))) {
+                            $r2Matches++;
+                            break;
+                        }
+                    }
+                }
+                if ($r2Matches >= 2) {
+                    $dataStartIdx = $headerRowIdx + 3;
+                }
+            }
+        }
+    }
+
+    $maxCols = 0;
+    for ($r = $headerRowIdx; $r < $dataStartIdx; $r++) {
+        if (isset($allRows[$r])) {
+            $maxCols = max($maxCols, count($allRows[$r]));
+        }
+    }
+
+    $headers = [];
+    for ($c = 0; $c < $maxCols; $c++) {
+        $parts = [];
+        for ($r = $headerRowIdx; $r < $dataStartIdx; $r++) {
+            $val = trim((string)($allRows[$r][$c] ?? ''));
+            if ($val !== '' && !in_array($val, $parts, true)) {
+                $parts[] = $val;
+            }
+        }
+        $headers[$c] = implode(' ', $parts);
+    }
+
+    $dataRows = array_slice($allRows, $dataStartIdx);
+    return [$headers, $dataRows];
+}
+
+function getBadDataColumnMap(array $header): array {
+    $map = [
+        'no'                 => findColumnIndex($header, ['no', 'no.', 'no urut', 'no_urut', 'nomor', 'nomor urut']),
+        'branch'             => findColumnIndex($header, [
+            'kantor cabang', 'kanca', 'nama branch', 'nama cabang', 'branch office', 'unit kerja', 'nama uker', 'uker', 'branch', 'cabang'
+        ]),
+        'pic_rac'            => findColumnIndex($header, [
+            'disposisi rac', 'disposisi_rac', 'pic rac', 'pic_rac', 'pic-rac', 'pic amlo', 'nama pic', 'rac officer', 'officer rac', 'pic', 'disposisi', 'rac'
+        ]),
+        'persentase'         => findColumnIndex($header, [
+            '%bad data', '% bad data', '% bad_data', 'bad data (%)', 'persentase bad data', '% persentase bad data', '%persentase', 'persentase_curr', 'persentase curr', '% bad data curr', '% bad data (current)', 'persentase', '%bad_data', 'bad data', 'scoring'
+        ]),
+        'average'            => findColumnIndex($header, [
+            'average', 'avarage', 'rata-rata', 'rata rata', 'avg', 'average bad data', 'avg bad data', 'rata-rata bad data', 'persentase_prev', 'persentase prev', '% bad data prev'
+        ]),
+        'status'             => findColumnIndex($header, ['status uker', 'status tl', 'status pelaksanaan', 'status']),
+        'month'              => findColumnIndex($header, ['posisi bulan', 'bulan', 'month', 'periode', 'posisi', 'tanggal', 'tgl']),
+        'region'             => findColumnIndex($header, ['kantor kanwil', 'kanwil', 'regional office', 'regional', 'region', 'wilayah', 'ro']),
+        'total_cif'          => findColumnIndex($header, ['total cif', 'cif total', 'total_cif']),
+        'total'              => findColumnIndex($header, ['total bad data', 'total']),
+        'reguler'            => findColumnIndex($header, ['reguler']),
+        'kerjasama'          => findColumnIndex($header, ['kerjasama']),
+        'bad_data_prev'      => findColumnIndex($header, ['bad data prev', 'bad_data_prev']),
+        'persentase_prev'    => findColumnIndex($header, ['persentase prev', 'persentase_prev', '% bad data prev']),
+        'bad_data_curr'      => findColumnIndex($header, ['bad data curr', 'bad_data_curr']),
+        'persentase_curr'    => findColumnIndex($header, ['persentase curr', 'persentase_curr', '% bad data curr']),
+        'perbaikan_bad_data' => findColumnIndex($header, ['perbaikan bad data', 'perbaikan_bad_data', 'perbaikan']),
+        'bad_data_baru'      => findColumnIndex($header, ['bad data baru', 'bad_data_baru']),
+        'keterangan'         => findColumnIndex($header, ['keterangan', 'catatan', 'note', 'notes'])
+    ];
+
+    if ($map['branch'] === null) {
+        throw new RuntimeException('Kolom BRANCH / Kantor Cabang tidak ditemukan dalam header berkas.');
     }
 
     return $map;
@@ -252,9 +440,7 @@ function saveBadDataRows(PDO $pdo, array $rows, array $map): array {
     $updated = 0;
     $skipped = 0;
 
-    $isComparison = ($map['mode'] ?? '') === 'comparison_17';
-
-    $checkStmt = $pdo->prepare('SELECT id FROM bad_data WHERE branch = :branch LIMIT 1');
+    $checkStmt = $pdo->prepare('SELECT id, pic_rac, persentase, average, region, month FROM bad_data WHERE branch = :branch LIMIT 1');
 
     $updateStmt = $pdo->prepare('
         UPDATE bad_data
@@ -293,80 +479,150 @@ function saveBadDataRows(PDO $pdo, array $rows, array $map): array {
         )
     ');
 
+    $lastAverage = '-';
+    $rowIdx = 0;
     foreach ($rows as $row) {
         if (!is_array($row)) {
             continue;
         }
 
-        if ($isComparison) {
-            $noUrut           = trim((string)($row[0] ?? ''));
-            $branch           = trim((string)($row[1] ?? ''));
-            $badDataPrev      = normalizeNumber($row[2] ?? null);
-            $totalCifPrev     = normalizeNumber($row[3] ?? null);
-            $totalPrev        = normalizeNumber($row[4] ?? null);
-            $regulerPrev      = normalizeNumber($row[5] ?? null);
-            $kerjasamaPrev    = normalizeNumber($row[6] ?? null);
-            $persentasePrev   = normalizeNumber($row[7] ?? null);
-            $badDataCurr      = normalizeNumber($row[8] ?? null);
-            $totalCifCurr     = normalizeNumber($row[9] ?? null);
-            $totalCurr        = normalizeNumber($row[10] ?? null);
-            $regulerCurr      = normalizeNumber($row[11] ?? null);
-            $kerjasamaCurr    = normalizeNumber($row[12] ?? null);
-            $persentaseCurr   = normalizeNumber($row[13] ?? null);
-            $perbaikanBadData = normalizeNumber($row[14] ?? null);
-            $badDataBaru      = normalizeNumber($row[15] ?? null);
-            $keterangan       = trim((string)($row[16] ?? ''));
+        $rowIdx++;
+        $branch = trim((string)($row[$map['branch']] ?? ''));
+        if ($branch === '' || $branch === '-' || is_numeric($branch)) {
+            $skipped++;
+            continue;
+        }
 
-            if ($branch === '' && $noUrut === '') {
-                continue;
-            }
-            if ($branch === '') {
-                $skipped++;
-                continue;
-            }
-
-            $totalCif = $totalCifCurr ?? $totalCifPrev;
-            $total    = $totalCurr ?? $totalPrev;
-            $reguler  = $regulerCurr ?? $regulerPrev;
-            $kerjasama = $kerjasamaCurr ?? $kerjasamaPrev;
-            $persentase = $persentaseCurr ?? $persentasePrev;
-            $average = $persentasePrev ?? $persentaseCurr;
-            $picRac = 'Kantor Cabang';
-            $status = ($perbaikanBadData !== null && (float)$perbaikanBadData > 0) ? 'Done' : 'Open';
-            $month = date('F Y');
-            $region = '-';
-        } else {
-            $noUrut           = null;
-            $branch           = trim((string)($row[$map['branch']] ?? ''));
-            $picRac           = trim((string)($row[$map['pic_rac']] ?? ''));
-            $persentase       = normalizeNumber($row[$map['persentase']] ?? null);
-            $average          = normalizeNumber($row[$map['average']] ?? null);
-            $status           = trim((string)($row[$map['status']] ?? 'Open'));
-            $month            = trim((string)($row[$map['month']] ?? ''));
-            $region           = trim((string)($row[$map['region']] ?? ''));
-            $totalCif         = null;
-            $total            = null;
-            $reguler          = null;
-            $kerjasama        = null;
-            $badDataPrev      = null;
-            $persentasePrev   = null;
-            $badDataCurr      = null;
-            $persentaseCurr   = $persentase;
-            $perbaikanBadData = null;
-            $badDataBaru      = null;
-            $keterangan       = null;
-
-            if ($branch === '' && $picRac === '') {
-                continue;
-            }
-            if ($branch === '') {
-                $skipped++;
-                continue;
+        // PIC RAC: Ambil dari kolom file jika tersedia dan bukan 'Kantor Cabang'
+        $picRac = '';
+        if ($map['pic_rac'] !== null && isset($row[$map['pic_rac']])) {
+            $rawPic = trim((string)$row[$map['pic_rac']]);
+            if ($rawPic !== '' && $rawPic !== '-' && strtolower($rawPic) !== 'kantor cabang') {
+                $picRac = $rawPic;
             }
         }
 
+        // Cek data yang sudah ada di database untuk cabang ini
         $checkStmt->execute([':branch' => $branch]);
         $existing = $checkStmt->fetch(PDO::FETCH_ASSOC);
+
+        if ($picRac === '') {
+            if ($existing && !empty($existing['pic_rac']) && $existing['pic_rac'] !== '-' && strtolower($existing['pic_rac']) !== 'kantor cabang') {
+                $picRac = $existing['pic_rac'];
+            } else {
+                $picRac = '-';
+            }
+        }
+
+        // % BAD DATA (persentase)
+        $rawPct = '';
+        if ($map['persentase'] !== null && isset($row[$map['persentase']])) {
+            $rawPct = trim((string)$row[$map['persentase']]);
+        } elseif ($map['persentase_curr'] !== null && isset($row[$map['persentase_curr']])) {
+            $rawPct = trim((string)$row[$map['persentase_curr']]);
+        } elseif ($map['persentase_prev'] !== null && isset($row[$map['persentase_prev']])) {
+            $rawPct = trim((string)$row[$map['persentase_prev']]);
+        }
+
+        // Validasi ketat: pastikan bukan nama cabang atau teks non-numerik yang salah terpetakan
+        if (preg_match('/^(kc|kanwil|kcp|unit|kantor|kk)\b/i', $rawPct) || !preg_match('/[0-9]/', $rawPct)) {
+            $persentase = ($existing && !empty($existing['persentase'])) ? $existing['persentase'] : '0.00%';
+        } else {
+            $cleanedPct = str_replace(['%', ' '], '', $rawPct);
+            $cleanedPct = str_replace(',', '.', $cleanedPct);
+            if (is_numeric($cleanedPct)) {
+                $f = (float)$cleanedPct;
+                if ($f > 0 && $f <= 1 && !str_contains($rawPct, '%')) {
+                    $persentase = number_format($f * 100, 2, '.', '') . '%';
+                } else {
+                    $persentase = number_format($f, 2, '.', '') . '%';
+                }
+            } elseif (str_contains($rawPct, '%')) {
+                $persentase = $rawPct;
+            } else {
+                $persentase = $rawPct !== '' ? $rawPct : '0.00%';
+            }
+        }
+
+        // AVERAGE
+        $average = '-';
+        if ($map['average'] !== null && isset($row[$map['average']])) {
+            $rawAvg = trim((string)$row[$map['average']]);
+            $cleanedAvg = str_replace(['%', ' '], '', $rawAvg);
+            $cleanedAvg = str_replace(',', '.', $cleanedAvg);
+            if (is_numeric($cleanedAvg)) {
+                $f = (float)$cleanedAvg;
+                if ($f > 0 && $f <= 1 && !str_contains($rawAvg, '%')) {
+                    $average = number_format($f * 100, 2, '.', '') . '%';
+                } else {
+                    $average = number_format($f, 2, '.', '') . '%';
+                }
+            } elseif (str_contains($rawAvg, '%')) {
+                $average = $rawAvg;
+            } elseif (!preg_match('/^(ya|tidak|done|open|belum)\b/i', $rawAvg) && $rawAvg !== '') {
+                $average = $rawAvg;
+            }
+            if ($average !== '-') {
+                $lastAverage = $average;
+            }
+        }
+
+        if ($average === '-' && $lastAverage !== '-') {
+            $average = $lastAverage;
+        }
+
+        // NO URUT
+        $noUrut = (string)$rowIdx;
+        if ($map['no'] !== null && isset($row[$map['no']])) {
+            $rawNo = trim((string)$row[$map['no']]);
+            if ($rawNo !== '' && (!is_numeric($rawNo) || (int)$rawNo < 30000)) {
+                $noUrut = $rawNo;
+            }
+        }
+
+        // STATUS
+        $status = 'Open';
+        if ($map['status'] !== null && isset($row[$map['status']])) {
+            $rawStatus = trim((string)$row[$map['status']]);
+            if (stripos($rawStatus, 'done') !== false || stripos($rawStatus, 'selesai') !== false || stripos($rawStatus, 'ya') !== false) {
+                $status = 'Done';
+            } elseif (stripos($rawStatus, 'open') !== false || stripos($rawStatus, 'belum') !== false) {
+                $status = 'Open';
+            }
+        }
+
+        // MONTH / PERIODE
+        $month = date('F Y');
+        if ($map['month'] !== null && isset($row[$map['month']])) {
+            $rawMonth = trim((string)$row[$map['month']]);
+            if (is_numeric($rawMonth) && (int)$rawMonth >= 40000 && (int)$rawMonth <= 55000) {
+                $month = date('F Y', ((int)$rawMonth - 25569) * 86400);
+            } elseif ($rawMonth !== '' && $rawMonth !== '-') {
+                $month = $rawMonth;
+            }
+        }
+
+        // REGION / WILAYAH
+        $region = '-';
+        if ($map['region'] !== null && isset($row[$map['region']])) {
+            $rawReg = trim((string)$row[$map['region']]);
+            if ($rawReg !== '') {
+                $region = $rawReg;
+            }
+        }
+
+        // Kolom opsional rekapan komparasi MDM
+        $totalCif         = ($map['total_cif'] !== null && isset($row[$map['total_cif']])) ? normalizeNumber($row[$map['total_cif']]) : null;
+        $total            = ($map['total'] !== null && isset($row[$map['total']])) ? normalizeNumber($row[$map['total']]) : null;
+        $reguler          = ($map['reguler'] !== null && isset($row[$map['reguler']])) ? normalizeNumber($row[$map['reguler']]) : null;
+        $kerjasama        = ($map['kerjasama'] !== null && isset($row[$map['kerjasama']])) ? normalizeNumber($row[$map['kerjasama']]) : null;
+        $badDataPrev      = ($map['bad_data_prev'] !== null && isset($row[$map['bad_data_prev']])) ? normalizeNumber($row[$map['bad_data_prev']]) : null;
+        $persentasePrev   = ($map['persentase_prev'] !== null && isset($row[$map['persentase_prev']])) ? normalizeNumber($row[$map['persentase_prev']]) : null;
+        $badDataCurr      = ($map['bad_data_curr'] !== null && isset($row[$map['bad_data_curr']])) ? normalizeNumber($row[$map['bad_data_curr']]) : null;
+        $persentaseCurr   = ($map['persentase_curr'] !== null && isset($row[$map['persentase_curr']])) ? normalizeNumber($row[$map['persentase_curr']]) : $persentase;
+        $perbaikanBadData = ($map['perbaikan_bad_data'] !== null && isset($row[$map['perbaikan_bad_data']])) ? normalizeNumber($row[$map['perbaikan_bad_data']]) : null;
+        $badDataBaru      = ($map['bad_data_baru'] !== null && isset($row[$map['bad_data_baru']])) ? normalizeNumber($row[$map['bad_data_baru']]) : null;
+        $keterangan       = ($map['keterangan'] !== null && isset($row[$map['keterangan']])) ? trim((string)$row[$map['keterangan']]) : null;
 
         $params = [
             ':no_urut'            => $noUrut,
@@ -385,7 +641,7 @@ function saveBadDataRows(PDO $pdo, array $rows, array $map): array {
             ':perbaikan_bad_data' => $perbaikanBadData,
             ':bad_data_baru'      => $badDataBaru,
             ':keterangan'         => $keterangan,
-            ':status'             => $status !== '' ? $status : 'Open',
+            ':status'             => $status,
             ':month'              => $month,
             ':region'             => $region
         ];
@@ -405,7 +661,7 @@ function saveBadDataRows(PDO $pdo, array $rows, array $map): array {
 // --------------------------------------------------------------------------
 // POST: Import handler
 // --------------------------------------------------------------------------
-if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_GET['action'] ?? '') === 'import') {
+if (($_SERVER['REQUEST_METHOD'] ?? '') === 'POST' && ($_GET['action'] ?? '') === 'import') {
     try {
         $rows = [];
 
@@ -424,7 +680,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_GET['action'] ?? '') === 'import
             }
 
             if ($extension === 'xlsx') {
-                $rows = parseXlsxFile($tmpName);
+                $rows = parseXlsxFile($tmpName, ['bad data', 'baddata', 'bad_data', 'bad']);
             } elseif ($extension === 'csv' || $extension === 'txt') {
                 $content = (string)file_get_contents($tmpName);
                 if (trim($content) === '') {
@@ -448,7 +704,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_GET['action'] ?? '') === 'import
             jsonResponse(false, 'Tidak ada baris data yang ditemukan.');
         }
 
-        $header = array_shift($rows);
+        [$header, $dataRows] = resolveBadDataHeadersAndRows($rows);
         if (!is_array($header) || empty($header)) {
             jsonResponse(false, 'Baris header tidak ditemukan.');
         }
@@ -456,7 +712,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_GET['action'] ?? '') === 'import
         $map = getBadDataColumnMap($header);
 
         $pdo->beginTransaction();
-        $result = saveBadDataRows($pdo, $rows, $map);
+        $result = saveBadDataRows($pdo, $dataRows, $map);
         $pdo->commit();
 
         $total = $result['inserted'] + $result['updated'];
@@ -479,9 +735,46 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_GET['action'] ?? '') === 'import
 }
 
 // --------------------------------------------------------------------------
+// POST: Clear / Reset handler
+// --------------------------------------------------------------------------
+if (($_SERVER['REQUEST_METHOD'] ?? '') === 'POST' && ($_GET['action'] ?? '') === 'clear') {
+    try {
+        $pdo->exec('TRUNCATE TABLE bad_data');
+        jsonResponse(true, 'Seluruh data bad data berhasil direset.');
+    } catch (Throwable $e) {
+        jsonResponse(false, 'Gagal menghapus data: ' . $e->getMessage());
+    }
+}
+
+// --------------------------------------------------------------------------
+// POST: Delete selected handler
+// --------------------------------------------------------------------------
+if (($_SERVER['REQUEST_METHOD'] ?? '') === 'POST' && ($_GET['action'] ?? '') === 'delete') {
+    try {
+        $input = json_decode(file_get_contents('php://input'), true) ?? $_POST;
+        $ids = $input['ids'] ?? ($input['id'] ?? []);
+        if (!is_array($ids)) {
+            $ids = [$ids];
+        }
+        $ids = array_values(array_unique(array_filter(array_map('intval', $ids))));
+        if (empty($ids)) {
+            jsonResponse(false, 'Tidak ada data yang dipilih untuk dihapus.');
+        }
+
+        $inQuery = implode(',', array_fill(0, count($ids), '?'));
+        $stmt = $pdo->prepare("DELETE FROM bad_data WHERE id IN ({$inQuery})");
+        $stmt->execute(array_values($ids));
+
+        jsonResponse(true, count($ids) . ' data terpilih berhasil dihapus.');
+    } catch (Throwable $e) {
+        jsonResponse(false, 'Gagal menghapus data terpilih: ' . $e->getMessage());
+    }
+}
+
+// --------------------------------------------------------------------------
 // GET: Fetch list handler
 // --------------------------------------------------------------------------
-if ($_SERVER['REQUEST_METHOD'] === 'GET') {
+if (($_SERVER['REQUEST_METHOD'] ?? '') === 'GET' && PHP_SAPI !== 'cli') {
     try {
         $filterStatus = trim((string)($_GET['status'] ?? ''));
         $filterMonth = trim((string)($_GET['month'] ?? ''));
@@ -512,7 +805,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'GET') {
         }
 
         $whereSql = !empty($where) ? 'WHERE ' . implode(' AND ', $where) : '';
-        $sql = "SELECT * FROM bad_data {$whereSql} ORDER BY id DESC";
+        $sql = "SELECT * FROM bad_data {$whereSql} ORDER BY id ASC";
 
         $stmt = $pdo->prepare($sql);
         $stmt->execute($params);
@@ -524,4 +817,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'GET') {
     }
 }
 
-jsonResponse(false, 'Metode request tidak didukung.');
+if (PHP_SAPI !== 'cli') {
+    jsonResponse(false, 'Metode request tidak didukung.');
+}

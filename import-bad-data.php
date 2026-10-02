@@ -323,7 +323,7 @@ require_once __DIR__ . '/includes/sidebar.php';
             <div class="import-info-icon">i</div>
             <div>
                 <strong>Ketentuan Pembaruan Otomatis:</strong> Data yang diimpor akan dicocokkan berdasarkan
-                <strong>Branch Office</strong>. Jika data cabang sudah ada sebelumnya, baris tersebut akan diperbarui
+                <strong>Branch</strong>. Jika data cabang sudah ada sebelumnya, baris tersebut akan diperbarui
                 dengan data periode terkini sehingga rekapan Bad Data selalu menggunakan data hasil import terakhir.
             </div>
         </div>
@@ -360,7 +360,7 @@ require_once __DIR__ . '/includes/sidebar.php';
                 <textarea
                     id="rawData"
                     class="paste-textarea"
-                    placeholder='"NO"|"BRANCH OFFICE"|"BAD DATA (26 SEP 2026)"|"TOTAL CIF"|"TOTAL"|"REGULER"|"KERJASAMA"|"%BAD DATA"|"BAD DATA (27 SEP 2026)"|"TOTAL CIF"|"TOTAL"|"REGULER"|"KERJASAMA"|"%BAD DATA"|"PERBAIKAN BAD DATA"|"BAD DATA BARU"|"KETERANGAN"&#10;"1"|"KC JAKARTA KOTA"|"120"|"2500"|"2500"|"2300"|"200"|"4.8%"|"110"|"2510"|"2510"|"2310"|"200"|"4.38%"|"15"|"5"|"Tindak lanjut selesai"'
+                    placeholder='"NO"|"UNIT KERJA"|"PIC RAC"|"%BAD DATA"|"AVERAGE"&#10;"1"|"KC JAKARTA THAMRIN"|"AHMAD FAUZI"|"4.85%"|"5.10%"&#10;"2"|"KC SURABAYA BASUKI RAHMAT"|"SITI NURHALIZA"|"3.20%"|"3.50%"'
                 ></textarea>
 
                 <button type="button" class="import-main-btn" id="btnImportText">
@@ -370,16 +370,9 @@ require_once __DIR__ . '/includes/sidebar.php';
         </div>
 
         <div class="supported-card">
-            <h2 class="supported-title">Format Kolom yang Didukung (17 Kolom):</h2>
+            <h2 class="supported-title">Format Kolom yang Didukung (5 Kolom):</h2>
             <div class="supported-content" style="font-weight:600;">
-                NO | BRANCH OFFICE | BAD DATA | TOTAL CIF | TOTAL | REGULER | KERJASAMA | %BAD DATA | BAD DATA | TOTAL CIF | TOTAL | REGULER | KERJASAMA | %BAD DATA | PERBAIKAN BAD DATA | BAD DATA BARU | KETERANGAN
-            </div>
-            <div style="margin-top:12px;font-size:12.5px;color:#475569;line-height:1.7;">
-                <strong>Rincian Format Kolom:</strong><br>
-                1. <strong>Identitas:</strong> <code>NO</code> | <code>BRANCH OFFICE</code><br>
-                2. <strong>Periode Awal (cth: 26 Sep 2026):</strong> <code>BAD DATA</code> | <code>TOTAL CIF</code> | <code>TOTAL</code> | <code>REGULER</code> | <code>KERJASAMA</code> | <code>%BAD DATA</code><br>
-                3. <strong>Periode Pembanding (cth: 27 Sep 2026):</strong> <code>BAD DATA</code> | <code>TOTAL CIF</code> | <code>TOTAL</code> | <code>REGULER</code> | <code>KERJASAMA</code> | <code>%BAD DATA</code><br>
-                4. <strong>Mutasi & Keterangan:</strong> <code>PERBAIKAN BAD DATA</code> | <code>BAD DATA BARU</code> | <code>KETERANGAN</code>
+                NO | UNIT KERJA | PIC RAC | %BAD DATA | AVERAGE
             </div>
         </div>
     </div>

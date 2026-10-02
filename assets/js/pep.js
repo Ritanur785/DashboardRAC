@@ -207,3 +207,90 @@ document.addEventListener('DOMContentLoaded', () => {
         });
     }
 });
+
+function openResetModal() {
+    const modal = document.getElementById('resetModal');
+    if (modal) modal.style.display = 'flex';
+}
+
+function closeResetModal() {
+    const modal = document.getElementById('resetModal');
+    if (modal) modal.style.display = 'none';
+}
+
+async function executeResetPep() {
+    const btn = document.getElementById('btnConfirmReset');
+    if (btn) {
+        btn.disabled = true;
+        btn.textContent = 'Menghapus...';
+    }
+
+    try {
+        const response = await fetch('api/pep.php?action=clear', { method: 'POST' });
+        const result = await response.json();
+        if (!result.success) {
+            alert(result.error || result.message || 'Gagal mereset data PEP.');
+            return;
+        }
+        window.location.reload();
+    } catch (err) {
+        alert('Terjadi kesalahan saat mereset seluruh data PEP.');
+    } finally {
+        if (btn) {
+            btn.disabled = false;
+            btn.textContent = 'Ya, Hapus Semua';
+        }
+    }
+}
+
+async function deleteSelectedPep() {
+    const checked = Array.from(document.querySelectorAll('.alert-check-item:checked')).map(cb => cb.value);
+    if (!checked.length) {
+        alert('Pilih setidaknya satu item PEP yang ingin dihapus.');
+        return;
+    }
+
+    if (!confirm('Apakah Anda yakin ingin menghapus ' + checked.length + ' item PEP terpilih? Data akan dihapus secara permanen.')) {
+        return;
+    }
+
+    try {
+        const response = await fetch('api/pep.php?action=delete', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ ids: checked })
+        });
+        const result = await response.json();
+        if (!result.success) {
+            alert(result.error || result.message || 'Gagal menghapus data terpilih.');
+            return;
+        }
+        window.location.reload();
+    } catch (err) {
+        alert('Terjadi kesalahan saat menghapus data PEP terpilih.');
+    }
+}
+
+async function deleteSinglePep(id) {
+    if (!id) return;
+    if (!confirm('Apakah Anda yakin ingin menghapus data PEP ini secara permanen?')) {
+        return;
+    }
+
+    try {
+        const response = await fetch('api/pep.php?action=delete', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ ids: [id] })
+        });
+        const result = await response.json();
+        if (!result.success) {
+            alert(result.error || result.message || 'Gagal menghapus data PEP.');
+            return;
+        }
+        window.location.reload();
+    } catch (err) {
+        alert('Terjadi kesalahan saat menghapus data.');
+    }
+}
+

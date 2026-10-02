@@ -81,7 +81,7 @@ function normalizeRegion(string $value, array $masterRegions): string {
 
     $upper = strtoupper($val);
 
-    if (preg_match('/(?:regional|region|ro|wilayah|kanwil)\s*(\d+)/i', $upper, $matches)) {
+    if (preg_match('/(?:regional|region|rewgion|ro|wilayah|kanwil)\s*(\d+)/i', $upper, $matches)) {
         $num = (int)$matches[1];
         if (isset($masterRegions[$num])) {
             return (string)$num;
@@ -94,7 +94,7 @@ function normalizeRegion(string $value, array $masterRegions): string {
         'VIII' => '8', 'VII' => '7', 'VI' => '6', 'V' => '5', 'IV' => '4',
         'III' => '3', 'II' => '2', 'I' => '1'
     ];
-    if (preg_match('/(?:regional|region|ro|wilayah|kanwil)\s*([ivx]+)\b/i', $upper, $matches)) {
+    if (preg_match('/(?:regional|region|rewgion|ro|wilayah|kanwil)\s*([ivx]+)\b/i', $upper, $matches)) {
         $roman = strtoupper($matches[1]);
         if (isset($romanMap[$roman])) {
             return $romanMap[$roman];
@@ -169,6 +169,9 @@ function normalizeTeam(string $value): string {
 
         'buddy out'    => 'Buddy Out',
         'buddyout'     => 'Buddy Out',
+        'buddy ojt'    => 'Buddy Out',
+        'buddyojt'     => 'Buddy Out',
+        'ojt'          => 'Buddy Out',
         'bo'           => 'Buddy Out',
         'buddy'        => 'Buddy Out',
         'pendamping'   => 'Buddy Out',
@@ -219,7 +222,8 @@ function isNonPersonName(string $name): bool {
     $normClean = str_replace([' ', '-', '_', '.', '/', '\\', ':', ';', '(', ')'], '', $norm);
 
     $badExact = [
-        'teammember', 'teamleader', 'buddyout', 'formasi', 'jumlah', 'total', 'subtotal', 'grandtotal',
+        'teammember', 'teamleader', 'buddyout', 'formasi', 'pemenuhan', 'gap', 'target', 'realisasi', 'selisih', 'kebutuhan',
+        'jumlah', 'total', 'subtotal', 'grandtotal',
         'kategori', 'posisi', 'jabatan', 'peran', 'status', 'bagian', 'divisi', 'keterangan', 'ket',
         'region', 'ro', 'wilayah', 'kanwil', 'kantorwilayah', 'regional', 'regionaloffice',
         'medan', 'pekanbaru', 'padang', 'palembang', 'bandarlampung', 'lampung',
@@ -234,11 +238,11 @@ function isNonPersonName(string $name): bool {
         return true;
     }
 
-    if (preg_match('/^(total|jumlah|grand\s*total|sub\s*total|formasi|rekap)(\s|$|:)/i', $norm)) {
+    if (preg_match('/^(total|jumlah|grand\s*total|sub\s*total|formasi|rekap|pemenuhan|gap|target|realisasi)(\s|$|:)/i', $norm)) {
         return true;
     }
 
-    if (preg_match('/^(region|ro)\s*\d+$/i', $norm)) {
+    if (preg_match('/^(regional|region|rewgion|ro)\s*\d+$/i', $norm)) {
         return true;
     }
 
@@ -475,7 +479,34 @@ function extractRacRecords(
 ): array {
     $extracted = [];
 
-    foreach ($sheets as $sheet) {
+    // Filter sheets: skip summary, pivot, and duplicate sheets
+    $hasNamedSheet = false;
+    foreach ($sheets as $s) {
+        $n = trim($s['name'] ?? '');
+        if (!preg_match('/^sheet\d+$/i', $n)) {
+            $hasNamedSheet = true;
+            break;
+        }
+    }
+
+    $validSheets = [];
+    foreach ($sheets as $s) {
+        $n = trim($s['name'] ?? '');
+        $lower = strtolower($n);
+        if (preg_match('/^(copy of|salinan|formasi|rekap|summary|ringkasan|grafik|chart|dashboard|pivot)/i', $lower)) {
+            continue;
+        }
+        if ($hasNamedSheet && preg_match('/^sheet\d+$/i', $lower)) {
+            continue;
+        }
+        $validSheets[] = $s;
+    }
+
+    if (empty($validSheets)) {
+        $validSheets = $sheets;
+    }
+
+    foreach ($validSheets as $sheet) {
         $sheetName = $sheet['name'] ?? 'Sheet';
         $rows = $sheet['rows'] ?? [];
         if (empty($rows)) {
@@ -487,11 +518,12 @@ function extractRacRecords(
 
         $currentSectionTeam = $sheetTeam !== '' ? $sheetTeam : $defaultFallbackTeam;
         $currentSectionRegion = $sheetRegion !== '' ? $sheetRegion : $defaultFallbackRegion;
-        $lastKnownRegion = $currentSectionRegion !== '' ? $currentSectionRegion : '1';
+        $lastKnownRegion = $currentSectionRegion;
 
         $headerMap = null;
         $sideBySideMap = null;
         $pendingRoleCols = [];
+        $pendingTopHeaderRow = null;
 
         foreach ($rows as $rawRow) {
             $row = array_map('cleanCellValue', $rawRow);
@@ -503,13 +535,38 @@ function extractRacRecords(
 
             $joinedRow = implode(' ', $nonEmptyCells);
 
-            // 1. Detect Section Banner (e.g. "TEAM LEADER", "REGION 2 PEKANBARU", "=== BUDDY OUT ===")
-            if (count($nonEmptyCells) <= 5) {
+            // 1. Check if this row is a Top-Level Merged Header with multiple teams
+            // (e.g. [No, Region, Team Leader, ..., Team Member, ..., Buddy OJT])
+            $rowTeamPositions = [];
+            foreach ($row as $cIdx => $cellVal) {
+                $cTeam = normalizeTeam($cellVal);
+                if ($cTeam !== '') {
+                    $rowTeamPositions[$cIdx] = $cTeam;
+                }
+            }
+            if (count(array_unique(array_values($rowTeamPositions))) >= 2) {
+                $pendingRoleCols = $rowTeamPositions;
+                $pendingTopHeaderRow = $row;
+                $headerMap = null;
+                $sideBySideMap = null;
+                continue;
+            }
+
+            // 2. Detect Section Banner ONLY if row does not have data cells (PN, phone, person name)
+            $hasDataLikeValues = false;
+            foreach ($nonEmptyCells as $c) {
+                if (preg_match('/^\d{4,}$/', $c) || preg_match('/^(?:\+?62|08|02)\d{6,}/', $c)) {
+                    $hasDataLikeValues = true;
+                    break;
+                }
+            }
+
+            if (!$hasDataLikeValues && count($nonEmptyCells) <= 3 && ($headerMap === null && $sideBySideMap === null)) {
                 $possibleTeam = normalizeTeam($joinedRow);
                 $possibleRegion = normalizeRegion($joinedRow, $masterRegions);
 
                 $normJoined = normalizeHeader($joinedRow);
-                $hasHeaderWords = preg_match('/(namalengkap|pic|personil|karyawan|perner|telepon|handphone|nomorhp)/', $normJoined);
+                $hasHeaderWords = preg_match('/(namalengkap|pic|personil|karyawan|perner|telepon|handphone|nomorhp|pn|jabatan)/i', $normJoined);
 
                 if (!$hasHeaderWords && ($possibleTeam !== '' || $possibleRegion !== '')) {
                     if ($possibleTeam !== '' && $possibleRegion === '') {
@@ -517,6 +574,7 @@ function extractRacRecords(
                         $headerMap = null;
                         $sideBySideMap = null;
                         $pendingRoleCols = [];
+                        $pendingTopHeaderRow = null;
                         continue;
                     }
                     if ($possibleRegion !== '' && $possibleTeam === '') {
@@ -531,25 +589,13 @@ function extractRacRecords(
                         $headerMap = null;
                         $sideBySideMap = null;
                         $pendingRoleCols = [];
+                        $pendingTopHeaderRow = null;
                         continue;
                     }
                 }
             }
 
-            // Check if this row is a Top-Level Merged Header with multiple teams
-            $rowTeamPositions = [];
-            foreach ($row as $cIdx => $cellVal) {
-                $cTeam = normalizeTeam($cellVal);
-                if ($cTeam !== '') {
-                    $rowTeamPositions[$cIdx] = $cTeam;
-                }
-            }
-            if (count(array_unique(array_values($rowTeamPositions))) >= 2) {
-                $pendingRoleCols = $rowTeamPositions;
-                continue;
-            }
-
-            // 2. Detect Table Header
+            // 3. Detect Table Header
             $normRow = array_map('normalizeHeader', $row);
 
             $hasNamaKeyword = false;
@@ -619,17 +665,27 @@ function extractRacRecords(
                                 break;
                             }
                         }
+                        if ($commonRegionCol === null && $pendingTopHeaderRow !== null) {
+                            foreach ($pendingTopHeaderRow as $colIdx => $val) {
+                                if (preg_match('/(region|ro|wilayah|kanwil)/i', normalizeHeader($val))) {
+                                    $commonRegionCol = $colIdx;
+                                    break;
+                                }
+                            }
+                        }
+
                         foreach ($sbMap as $r => $cols) {
                             $sbMap[$r]['region'] = $commonRegionCol;
                         }
                         $sideBySideMap = $sbMap;
                         $headerMap = null;
                         $pendingRoleCols = [];
+                        $pendingTopHeaderRow = null;
                         continue;
                     }
                 }
 
-                // B. Check Single-Row Side-by-Side header (e.g. TL PN, TM PN, BO Nama)
+                // B. Single-Row Side-by-Side header
                 $sbMap = [];
                 $rolesDetected = [];
 
@@ -671,6 +727,7 @@ function extractRacRecords(
                     $sideBySideMap = $sbMap;
                     $headerMap = null;
                     $pendingRoleCols = [];
+                    $pendingTopHeaderRow = null;
                     continue;
                 }
 
@@ -699,19 +756,28 @@ function extractRacRecords(
 
                 $sideBySideMap = null;
                 $pendingRoleCols = [];
+                $pendingTopHeaderRow = null;
                 continue;
             }
 
-            // 3. Process Data Row via Side-by-Side Map
+            // 4. Process Data Row via Side-by-Side Map
             if ($sideBySideMap !== null) {
                 $rowRegion = '';
                 $firstRoleKey = array_key_first($sideBySideMap);
                 $commonRegionIdx = $sideBySideMap[$firstRoleKey]['region'] ?? null;
-                if ($commonRegionIdx !== null && isset($row[$commonRegionIdx])) {
+                if ($commonRegionIdx !== null && isset($row[$commonRegionIdx]) && $row[$commonRegionIdx] !== '') {
                     $rowRegion = normalizeRegion($row[$commonRegionIdx], $masterRegions);
                 }
-                if ($rowRegion === '' && isset($row[0])) {
-                    $rowRegion = normalizeRegion($row[0], $masterRegions);
+                if ($rowRegion === '') {
+                    for ($c = 0; $c < min(3, count($row)); $c++) {
+                        if ($row[$c] !== '') {
+                            $r = normalizeRegion($row[$c], $masterRegions);
+                            if ($r !== '') {
+                                $rowRegion = $r;
+                                break;
+                            }
+                        }
+                    }
                 }
                 if ($rowRegion === '') {
                     $rowRegion = $currentSectionRegion !== '' ? $currentSectionRegion : ($lastKnownRegion !== '' ? $lastKnownRegion : ($defaultFallbackRegion ?: '1'));
@@ -737,7 +803,7 @@ function extractRacRecords(
                 continue;
             }
 
-            // 4. Process Data Row via Header Map
+            // 5. Process Data Row via Header Map
             if ($headerMap !== null) {
                 $rawRegion = $headerMap['region'] !== null && isset($row[$headerMap['region']]) ? $row[$headerMap['region']] : '';
                 $rawTeam   = $headerMap['team'] !== null && isset($row[$headerMap['team']]) ? $row[$headerMap['team']] : '';
@@ -790,7 +856,7 @@ function extractRacRecords(
                 continue;
             }
 
-            // 5. Headerless Fallback (Heuristic Cell Detection)
+            // 6. Headerless Fallback (Heuristic Cell Detection)
             $detectedTelp = '';
             $detectedPn = '';
             $detectedRegion = '';
@@ -860,7 +926,49 @@ function extractRacRecords(
         }
     }
 
-    return $extracted;
+    // Deduplicate & Merge Records
+    $merged = [];
+    foreach ($extracted as $item) {
+        $reg = $item['region'];
+        $team = $item['team'];
+        $cleanName = strtolower(preg_replace('/[^a-z0-9]/', '', $item['nama']));
+        $keyName = $reg . '|' . $team . '|' . $cleanName;
+        $keyPn = ($item['pn'] !== '') ? ($reg . '|' . $team . '|pn_' . $item['pn']) : null;
+
+        $targetKey = null;
+        if ($keyPn !== null && isset($merged[$keyPn])) {
+            $targetKey = $keyPn;
+        } elseif (isset($merged[$keyName])) {
+            $targetKey = $keyName;
+        }
+
+        if ($targetKey !== null) {
+            if ($merged[$targetKey]['pn'] === '' && $item['pn'] !== '') {
+                $merged[$targetKey]['pn'] = $item['pn'];
+            }
+            if ($merged[$targetKey]['telepon'] === '' && $item['telepon'] !== '') {
+                $merged[$targetKey]['telepon'] = $item['telepon'];
+            }
+        } else {
+            $chosenKey = $keyPn ?? $keyName;
+            $merged[$chosenKey] = $item;
+            if ($keyPn !== null) {
+                $merged[$keyName] = &$merged[$chosenKey];
+            }
+        }
+    }
+
+    $final = [];
+    $seenIds = [];
+    foreach ($merged as $it) {
+        $id = $it['region'] . '|' . $it['team'] . '|' . $it['pn'] . '|' . strtolower(trim($it['nama']));
+        if (!isset($seenIds[$id])) {
+            $seenIds[$id] = true;
+            $final[] = $it;
+        }
+    }
+
+    return $final;
 }
 
 // --------------------------------------------------------------------------
@@ -914,8 +1022,22 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 throw new RuntimeException('Berkas kosong atau tidak ada data yang dapat dibaca.');
             }
 
-            $targetRegion = trim((string)($_POST['target_region'] ?? $_POST['filter_region'] ?? $_GET['region'] ?? ''));
-            $targetTeam   = trim((string)($_POST['target_team'] ?? $_POST['filter_team'] ?? $_GET['team'] ?? ''));
+            $targetRegion = trim((string)($_POST['target_region'] ?? ''));
+            $targetTeam   = trim((string)($_POST['target_team'] ?? ''));
+
+            // Jika user memilih "Otomatis dari Excel", deteksi apakah nama berkas menyertakan Region/Team
+            if ($targetRegion === '') {
+                $fileRegion = normalizeRegion($fileName, MASTER_REGIONS);
+                if ($fileRegion !== '') {
+                    $targetRegion = $fileRegion;
+                }
+            }
+            if ($targetTeam === '') {
+                $fileTeam = normalizeTeam($fileName);
+                if ($fileTeam !== '') {
+                    $targetTeam = $fileTeam;
+                }
+            }
 
             $extracted = extractRacRecords($sheets, MASTER_REGIONS, $targetRegion, $targetTeam);
 
@@ -1092,6 +1214,19 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     $importMessage = "Berhasil mereset data terpilih ({$targetLabel}). Total {$deletedCount} data telah dihapus.";
                     $importType = 'success';
                 }
+            } elseif ($resetScope === 'single') {
+                $targetId = (int)($_POST['target_id'] ?? 0);
+                if ($targetId > 0) {
+                    $delStmt = $pdo->prepare("DELETE FROM data_rac WHERE id = :id");
+                    $delStmt->execute([':id' => $targetId]);
+                    $pdo->commit();
+                    $importMessage = "Berhasil menghapus data personil terpilih.";
+                    $importType = 'success';
+                } else {
+                    $pdo->rollBack();
+                    $importMessage = 'ID personil tidak valid.';
+                    $importType = 'error';
+                }
             } else {
                 $pdo->rollBack();
                 $importMessage = 'Pilihan reset tidak dikenali.';
@@ -1146,20 +1281,61 @@ if ($filterTeam !== '') {
 }
 
 if ($search !== '') {
+    $searchLower = strtolower($search);
     $cleanDigits = preg_replace('/[^\d]/', '', $search);
+
+    $searchConditions = [];
+    $searchConditions[] = 'nama LIKE :search_nama';
+    $searchConditions[] = 'pn LIKE :search_pn';
+    $searchConditions[] = 'telepon LIKE :search_telp';
+    $params[':search_nama'] = '%' . $search . '%';
+    $params[':search_pn']   = '%' . $search . '%';
+    $params[':search_telp'] = '%' . $search . '%';
+
     if ($cleanDigits !== '' && strlen($cleanDigits) >= 3) {
-        $where[] = '(nama LIKE :search_nama OR pn LIKE :search_pn OR telepon LIKE :search_telp OR REPLACE(REPLACE(REPLACE(telepon, "-", ""), " ", ""), "+", "") LIKE :digits_telp OR pn LIKE :digits_pn)';
-        $params[':search_nama'] = '%' . $search . '%';
-        $params[':search_pn']   = '%' . $search . '%';
-        $params[':search_telp'] = '%' . $search . '%';
+        $searchConditions[] = 'REPLACE(REPLACE(REPLACE(telepon, "-", ""), " ", ""), "+", "") LIKE :digits_telp';
+        $searchConditions[] = 'pn LIKE :digits_pn';
         $params[':digits_telp'] = '%' . $cleanDigits . '%';
         $params[':digits_pn']   = '%' . $cleanDigits . '%';
-    } else {
-        $where[] = '(nama LIKE :search_nama OR pn LIKE :search_pn OR telepon LIKE :search_telp)';
-        $params[':search_nama'] = '%' . $search . '%';
-        $params[':search_pn']   = '%' . $search . '%';
-        $params[':search_telp'] = '%' . $search . '%';
     }
+
+    // Dukungan pencarian Region (misal "regional 2", "region 2", "ro 2", "pekanbaru", "medan")
+    $regMatchNum = null;
+    if (preg_match('/(?:regional|region|rewgion|ro|wilayah|kanwil)\s*(\d+)/i', $search, $m)) {
+        $num = (int)$m[1];
+        if (isset(MASTER_REGIONS[$num])) {
+            $regMatchNum = (string)$num;
+            $searchConditions[] = 'region = :matched_region';
+            $params[':matched_region'] = $regMatchNum;
+        }
+    }
+
+    if ($regMatchNum === null) {
+        $detectedRegionNum = normalizeRegion($search, MASTER_REGIONS);
+        if ($detectedRegionNum !== '') {
+            $searchConditions[] = 'region = :matched_region';
+            $params[':matched_region'] = $detectedRegionNum;
+        }
+
+        foreach (MASTER_REGIONS as $rNum => $rName) {
+            $rNameLower = strtolower($rName);
+            $normRName = str_replace('region', 'regional', $rNameLower);
+            if (preg_match('/\b' . preg_quote($searchLower, '/') . '\b/i', $rNameLower) || 
+                preg_match('/\b' . preg_quote($searchLower, '/') . '\b/i', $normRName) ||
+                (strlen($searchLower) >= 4 && str_contains($rNameLower, $searchLower))) {
+                $k = ':reg_label_' . $rNum;
+                $searchConditions[] = "region = {$k}";
+                $params[$k] = (string)$rNum;
+            }
+        }
+
+        if (is_numeric($search) && isset(MASTER_REGIONS[(int)$search])) {
+            $searchConditions[] = 'region = :search_exact_num';
+            $params[':search_exact_num'] = (string)(int)$search;
+        }
+    }
+
+    $where[] = '(' . implode(' OR ', array_unique($searchConditions)) . ')';
 }
 
 $whereSql = !empty($where) ? 'WHERE ' . implode(' AND ', $where) : '';
@@ -1520,16 +1696,6 @@ require_once __DIR__ . '/includes/sidebar.php';
                     <button
                         type="button"
                         class="btn btn-sm"
-                        id="btnResetDataRac"
-                        onclick="openResetDataRacModal()"
-                        style="background:#fee2e2;color:#b91c1c;border:1px solid #fca5a5;font-weight:600;display:inline-flex;align-items:center;gap:6px;"
-                    >
-                        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18"></path><path d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6"></path><path d="M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2"></path></svg>
-                        Reset Data
-                    </button>
-                    <button
-                        type="button"
-                        class="btn btn-sm"
                         id="btnImportDataRac"
                         onclick="openImportDataRac()"
                         style="background:#ffffff;color:#333333;border:1px solid #d1d5db;"
@@ -1644,22 +1810,26 @@ require_once __DIR__ . '/includes/sidebar.php';
                                 <th>PN</th>
                                 <th>Nama</th>
                                 <th>No Telepon</th>
+                                <th style="width:70px;text-align:center;">Aksi</th>
                             </tr>
                         </thead>
                         <tbody>
                             <?php if (empty($teamGroups['Team Leader'])): ?>
                                 <tr>
-                                    <td colspan="4" class="rac-empty">
+                                    <td colspan="5" class="rac-empty">
                                         <?= $filterRegion !== '' ? 'Tidak ada data Team Leader untuk ' . htmlspecialchars(MASTER_REGIONS[(int)$filterRegion] ?? ('Region ' . $filterRegion), ENT_QUOTES, 'UTF-8') . '.' : 'Tidak ada data Team Leader.' ?>
                                     </td>
                                 </tr>
                             <?php else: ?>
                                 <?php foreach ($teamGroups['Team Leader'] as $row): ?>
-                                    <tr>
+                                    <tr data-region="<?= htmlspecialchars((string)$row['region'], ENT_QUOTES, 'UTF-8') ?>" data-region-name="<?= htmlspecialchars(strtolower(MASTER_REGIONS[(int)$row['region']] ?? ('region ' . $row['region'])), ENT_QUOTES, 'UTF-8') ?>">
                                         <td><span style="display:inline-block;padding:3px 8px;background:#e0f2fe;color:#0369a1;border-radius:4px;font-size:12px;font-weight:600;"><?= htmlspecialchars(MASTER_REGIONS[(int)$row['region']] ?? ('Region ' . $row['region']), ENT_QUOTES, 'UTF-8') ?></span></td>
                                         <td><?= htmlspecialchars((string)($row['pn'] ?: '-'), ENT_QUOTES, 'UTF-8') ?></td>
                                         <td><strong><?= htmlspecialchars((string)$row['nama'], ENT_QUOTES, 'UTF-8') ?></strong></td>
                                         <td><?= htmlspecialchars((string)($row['telepon'] ?: '-'), ENT_QUOTES, 'UTF-8') ?></td>
+                                        <td style="text-align:center;">
+                                            <button type="button" class="btn btn-danger btn-sm" onclick="deleteSingleRac(<?= (int)$row['id'] ?>, '<?= htmlspecialchars(addslashes($row['nama']), ENT_QUOTES, 'UTF-8') ?>')" title="Hapus personil ini">Hapus</button>
+                                        </td>
                                     </tr>
                                 <?php endforeach; ?>
                             <?php endif; ?>
@@ -1684,22 +1854,26 @@ require_once __DIR__ . '/includes/sidebar.php';
                                 <th>PN</th>
                                 <th>Nama</th>
                                 <th>No Telepon</th>
+                                <th style="width:70px;text-align:center;">Aksi</th>
                             </tr>
                         </thead>
                         <tbody>
                             <?php if (empty($teamGroups['Team Member'])): ?>
                                 <tr>
-                                    <td colspan="4" class="rac-empty">
+                                    <td colspan="5" class="rac-empty">
                                         <?= $filterRegion !== '' ? 'Tidak ada data Team Member untuk ' . htmlspecialchars(MASTER_REGIONS[(int)$filterRegion] ?? ('Region ' . $filterRegion), ENT_QUOTES, 'UTF-8') . '.' : 'Tidak ada data Team Member.' ?>
                                     </td>
                                 </tr>
                             <?php else: ?>
                                 <?php foreach ($teamGroups['Team Member'] as $row): ?>
-                                    <tr>
+                                    <tr data-region="<?= htmlspecialchars((string)$row['region'], ENT_QUOTES, 'UTF-8') ?>" data-region-name="<?= htmlspecialchars(strtolower(MASTER_REGIONS[(int)$row['region']] ?? ('region ' . $row['region'])), ENT_QUOTES, 'UTF-8') ?>">
                                         <td><span style="display:inline-block;padding:3px 8px;background:#f1f5f9;color:#334155;border-radius:4px;font-size:12px;font-weight:600;"><?= htmlspecialchars(MASTER_REGIONS[(int)$row['region']] ?? ('Region ' . $row['region']), ENT_QUOTES, 'UTF-8') ?></span></td>
                                         <td><?= htmlspecialchars((string)($row['pn'] ?: '-'), ENT_QUOTES, 'UTF-8') ?></td>
                                         <td><strong><?= htmlspecialchars((string)$row['nama'], ENT_QUOTES, 'UTF-8') ?></strong></td>
                                         <td><?= htmlspecialchars((string)($row['telepon'] ?: '-'), ENT_QUOTES, 'UTF-8') ?></td>
+                                        <td style="text-align:center;">
+                                            <button type="button" class="btn btn-danger btn-sm" onclick="deleteSingleRac(<?= (int)$row['id'] ?>, '<?= htmlspecialchars(addslashes($row['nama']), ENT_QUOTES, 'UTF-8') ?>')" title="Hapus personil ini">Hapus</button>
+                                        </td>
                                     </tr>
                                 <?php endforeach; ?>
                             <?php endif; ?>
@@ -1724,22 +1898,26 @@ require_once __DIR__ . '/includes/sidebar.php';
                                 <th>PN</th>
                                 <th>Nama</th>
                                 <th>No Telepon</th>
+                                <th style="width:70px;text-align:center;">Aksi</th>
                             </tr>
                         </thead>
                         <tbody>
                             <?php if (empty($teamGroups['Buddy Out'])): ?>
                                 <tr>
-                                    <td colspan="4" class="rac-empty">
+                                    <td colspan="5" class="rac-empty">
                                         <?= $filterRegion !== '' ? 'Tidak ada data Buddy Out untuk ' . htmlspecialchars(MASTER_REGIONS[(int)$filterRegion] ?? ('Region ' . $filterRegion), ENT_QUOTES, 'UTF-8') . '.' : 'Tidak ada data Buddy Out.' ?>
                                     </td>
                                 </tr>
                             <?php else: ?>
                                 <?php foreach ($teamGroups['Buddy Out'] as $row): ?>
-                                    <tr>
+                                    <tr data-region="<?= htmlspecialchars((string)$row['region'], ENT_QUOTES, 'UTF-8') ?>" data-region-name="<?= htmlspecialchars(strtolower(MASTER_REGIONS[(int)$row['region']] ?? ('region ' . $row['region'])), ENT_QUOTES, 'UTF-8') ?>">
                                         <td><span style="display:inline-block;padding:3px 8px;background:#fef3c7;color:#92400e;border-radius:4px;font-size:12px;font-weight:600;"><?= htmlspecialchars(MASTER_REGIONS[(int)$row['region']] ?? ('Region ' . $row['region']), ENT_QUOTES, 'UTF-8') ?></span></td>
                                         <td><?= htmlspecialchars((string)($row['pn'] ?: '-'), ENT_QUOTES, 'UTF-8') ?></td>
                                         <td><strong><?= htmlspecialchars((string)$row['nama'], ENT_QUOTES, 'UTF-8') ?></strong></td>
                                         <td><?= htmlspecialchars((string)($row['telepon'] ?: '-'), ENT_QUOTES, 'UTF-8') ?></td>
+                                        <td style="text-align:center;">
+                                            <button type="button" class="btn btn-danger btn-sm" onclick="deleteSingleRac(<?= (int)$row['id'] ?>, '<?= htmlspecialchars(addslashes($row['nama']), ENT_QUOTES, 'UTF-8') ?>')" title="Hapus personil ini">Hapus</button>
+                                        </td>
                                     </tr>
                                 <?php endforeach; ?>
                             <?php endif; ?>
@@ -1789,9 +1967,9 @@ require_once __DIR__ . '/includes/sidebar.php';
                         Wilayah (Jika file tanpa kolom Region):
                     </label>
                     <select name="target_region" id="importTargetRegion" class="form-control" style="font-size:12.5px;padding:6px 10px;">
-                        <option value="">Otomatis dari Excel</option>
+                        <option value="" selected>Otomatis dari Excel</option>
                         <?php foreach (MASTER_REGIONS as $rNum => $rName): ?>
-                            <option value="<?= $rNum ?>" <?= ($filterRegion === (string)$rNum) ? 'selected' : '' ?>>
+                            <option value="<?= $rNum ?>">
                                 Region <?= $rNum ?> - <?= htmlspecialchars($rName, ENT_QUOTES, 'UTF-8') ?>
                             </option>
                         <?php endforeach; ?>
@@ -1802,9 +1980,9 @@ require_once __DIR__ . '/includes/sidebar.php';
                         Tim (Jika file tanpa kolom Tim):
                     </label>
                     <select name="target_team" id="importTargetTeam" class="form-control" style="font-size:12.5px;padding:6px 10px;">
-                        <option value="">Otomatis dari Excel</option>
+                        <option value="" selected>Otomatis dari Excel</option>
                         <?php foreach ($allowedTeams as $tOption): ?>
-                            <option value="<?= htmlspecialchars($tOption, ENT_QUOTES, 'UTF-8') ?>" <?= ($filterTeam === $tOption) ? 'selected' : '' ?>>
+                            <option value="<?= htmlspecialchars($tOption, ENT_QUOTES, 'UTF-8') ?>">
                                 <?= htmlspecialchars($tOption, ENT_QUOTES, 'UTF-8') ?>
                             </option>
                         <?php endforeach; ?>
@@ -1941,6 +2119,13 @@ require_once __DIR__ . '/includes/sidebar.php';
     </div>
 </div>
 
+<!-- FORM TERSEMBUNYI UNTUK HAPUS SINGLE PERSONIL -->
+<form id="formDeleteSingleRac" method="POST" action="data_rac.php" style="display:none;">
+    <input type="hidden" name="action" value="reset_rac">
+    <input type="hidden" name="reset_scope" value="single">
+    <input type="hidden" name="target_id" id="inputDeleteSingleTargetId" value="">
+</form>
+
 <script>
 function openImportDataRac() {
     const modal = document.getElementById('modalImportDataRac');
@@ -2005,6 +2190,16 @@ function executeReset(scope) {
     form.submit();
 }
 
+function deleteSingleRac(id, name) {
+    if (!id) return;
+    const label = name ? ` "${name}"` : '';
+    if (!confirm(`Apakah Anda yakin ingin menghapus data personil${label} secara permanen?`)) {
+        return;
+    }
+    document.getElementById('inputDeleteSingleTargetId').value = id;
+    document.getElementById('formDeleteSingleRac').submit();
+}
+
 function handleAutoImport(input) {
     if (input.files && input.files.length > 0) {
         const statusBox = document.getElementById('racUploadStatus');
@@ -2037,12 +2232,15 @@ if (formImport) {
     });
 }
 
-// Live search client-side for instantaneous feedback on Nama / PN / Telepon
+// Live search client-side for instantaneous feedback on Nama / PN / Telepon / Region
 const searchInput = document.getElementById('filterSearch');
 if (searchInput) {
     searchInput.addEventListener('input', function() {
         const query = this.value.trim().toLowerCase();
+        const normQuery = query.replace(/\bregional\b/gi, 'region');
         const cleanQuery = query.replace(/[^\d]/g, '');
+        const regMatch = query.match(/(?:regional|region|rewgion|ro|wilayah)\s*(\d+)/i);
+        const queryRegNum = regMatch ? String(parseInt(regMatch[1], 10)) : '';
 
         document.querySelectorAll('.rac-team-section').forEach(section => {
             let visibleCount = 0;
@@ -2050,10 +2248,19 @@ if (searchInput) {
             rows.forEach(tr => {
                 const text = tr.innerText.toLowerCase();
                 const numText = text.replace(/[^\d]/g, '');
+                const rowRegion = tr.getAttribute('data-region') || '';
+                const rowRegionName = tr.getAttribute('data-region-name') || '';
                 
-                const matches = query === '' 
-                    || text.includes(query) 
-                    || (cleanQuery.length >= 3 && numText.includes(cleanQuery));
+                let matches = false;
+                if (query === '') {
+                    matches = true;
+                } else if (queryRegNum !== '') {
+                    matches = (rowRegion === queryRegNum);
+                } else if (text.includes(query) || text.includes(normQuery) || rowRegionName.includes(query) || rowRegionName.includes(normQuery)) {
+                    matches = true;
+                } else if (cleanQuery.length >= 3 && numText.includes(cleanQuery)) {
+                    matches = true;
+                }
 
                 tr.style.display = matches ? '' : 'none';
                 if (matches) visibleCount++;

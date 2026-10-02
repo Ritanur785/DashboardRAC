@@ -135,6 +135,11 @@ require_once __DIR__ . '/includes/sidebar.php';
                 </svg>
                 Import Excel / CSV
             </a>
+            <?php if ($totalRecords > 0): ?>
+                <button type="button" class="btn btn-danger btn-sm" id="btnResetPep" onclick="openResetModal()">
+                    Reset Seluruh Data
+                </button>
+            <?php endif; ?>
         </div>
     </div>
 
@@ -179,7 +184,7 @@ require_once __DIR__ . '/includes/sidebar.php';
 
         <div class="filter-actions">
             <button type="submit" class="btn btn-primary">Terapkan Filter</button>
-            <a href="pep.php" class="btn btn-secondary">Reset</a>
+            <a href="pep.php" class="btn btn-secondary">Reset Filter</a>
         </div>
     </form>
 
@@ -215,14 +220,25 @@ require_once __DIR__ . '/includes/sidebar.php';
                 </thead>
                 <tbody>
                     <tr id="bulkActionRow" style="display: none;">
-                        <td colspan="21" style="padding: 8px 12px; background: #ffffff; border-bottom: 1px solid var(--border-color);">
-                            <button type="button" id="btnOpenBulkModal" class="btn btn-primary btn-bulk-fullwidth">
-                                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
-                                    <path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"></path>
-                                    <path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"></path>
-                                </svg>
-                                <span id="bulkBtnText">Update Item Terpilih</span>
-                            </button>
+                        <td colspan="21" style="padding: 10px 14px; background: #fef2f2; border-bottom: 1px solid #fecaca;">
+                            <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px;">
+                                <span id="bulkSelectedCountText" style="font-size:13px;color:#991b1b;font-weight:700;">0 data dipilih</span>
+                                <div style="display:flex;gap:8px;">
+                                    <button type="button" id="btnOpenBulkModal" class="btn btn-primary btn-sm" style="display:inline-flex;align-items:center;gap:6px;">
+                                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+                                            <path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"></path>
+                                            <path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"></path>
+                                        </svg>
+                                        <span id="bulkBtnText">Update Item Terpilih</span>
+                                    </button>
+                                    <button type="button" id="btnDeleteBulkPep" class="btn btn-danger btn-sm" onclick="deleteSelectedPep()" style="display:inline-flex;align-items:center;gap:6px;">
+                                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+                                            <path d="M3 6h18"></path><path d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6"></path><path d="M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2"></path>
+                                        </svg>
+                                        Hapus Data Terpilih
+                                    </button>
+                                </div>
+                            </div>
                         </td>
                     </tr>
                     <?php if (empty($alerts)): ?>
@@ -272,7 +288,10 @@ require_once __DIR__ . '/includes/sidebar.php';
                                     <?php endif; ?>
                                 </td>
                                 <td>
-                                    <button type="button" class="btn btn-secondary btn-sm btn-update-progress" data-id="<?= $row['id'] ?>">Update</button>
+                                    <div style="display:inline-flex;gap:4px;">
+                                        <button type="button" class="btn btn-secondary btn-sm btn-update-progress" data-id="<?= $row['id'] ?>">Update</button>
+                                        <button type="button" class="btn btn-danger btn-sm" onclick="deleteSinglePep(<?= (int)$row['id'] ?>)" title="Hapus item PEP ini">Hapus</button>
+                                    </div>
                                 </td>
                             </tr>
                         <?php endforeach; ?>
@@ -415,6 +434,20 @@ require_once __DIR__ . '/includes/sidebar.php';
                 </button>
             </div>
         </form>
+    </div>
+</div>
+
+<!-- MODAL RESET KONFIRMASI -->
+<div id="resetModal" style="display:none;position:fixed;inset:0;background:rgba(15,23,42,0.6);z-index:9999;align-items:center;justify-content:center;padding:20px;">
+    <div style="background:#ffffff;border-radius:10px;max-width:440px;width:100%;padding:24px;box-shadow:0 20px 25px -5px rgba(0,0,0,0.2);">
+        <h3 style="margin:0 0 10px;font-size:18px;color:#0f172a;font-weight:700;">Konfirmasi Reset Data</h3>
+        <p style="margin:0 0 20px;font-size:14px;color:#475569;line-height:1.5;">
+            Apakah Anda yakin ingin mereset seluruh data PEP? Seluruh baris yang tersimpan akan dihapus secara permanen.
+        </p>
+        <div style="display:flex;justify-content:flex-end;gap:10px;">
+            <button type="button" class="btn btn-secondary" onclick="closeResetModal()">Batal</button>
+            <button type="button" class="btn btn-danger" id="btnConfirmReset" onclick="executeResetPep()">Ya, Hapus Semua</button>
+        </div>
     </div>
 </div>
 

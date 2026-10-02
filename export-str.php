@@ -10,33 +10,66 @@ $pdo = getDbConnection();
 
 $filterBulan = trim((string)($_GET['bulan'] ?? ''));
 
-$monthsIndo = [
-    '01' => 'Januari', '02' => 'Februari', '03' => 'Maret',
-    '04' => 'April',   '05' => 'Mei',      '06' => 'Juni',
-    '07' => 'Juli',    '08' => 'Agustus',  '09' => 'September',
-    '10' => 'Oktober', '11' => 'November', '12' => 'Desember'
+$daftarBulan = [
+    1  => 'Januari',
+    2  => 'Februari',
+    3  => 'Maret',
+    4  => 'April',
+    5  => 'Mei',
+    6  => 'Juni',
+    7  => 'Juli',
+    8  => 'Agustus',
+    9  => 'September',
+    10 => 'Oktober',
+    11 => 'November',
+    12 => 'Desember'
 ];
 
-$namaBulan = 'Semua Periode';
+$namaBulan = 'Semua Bulan';
+$filterBulanNum = null;
+
 if ($filterBulan !== '') {
-    $parts = explode('-', $filterBulan);
-    if (count($parts) === 2 && isset($monthsIndo[$parts[1]])) {
-        $namaBulan = $monthsIndo[$parts[1]];
+    if (is_numeric($filterBulan)) {
+        $n = (int)$filterBulan;
+        if ($n >= 1 && $n <= 12) {
+            $filterBulanNum = $n;
+            $namaBulan = $daftarBulan[$n];
+        }
     } else {
-        $namaBulan = $filterBulan;
+        foreach ($daftarBulan as $mNum => $mName) {
+            if (strcasecmp($mName, $filterBulan) === 0) {
+                $filterBulanNum = $mNum;
+                $namaBulan = $mName;
+                break;
+            }
+        }
+        if ($filterBulanNum === null && preg_match('/-(\d{1,2})$/', $filterBulan, $m)) {
+            $n = (int)$m[1];
+            if ($n >= 1 && $n <= 12) {
+                $filterBulanNum = $n;
+                $namaBulan = $daftarBulan[$n];
+            }
+        }
     }
 }
 
+$strMonthExpr = "MONTH(CASE 
+    WHEN posisi REGEXP '^[0-9]+$' AND CAST(posisi AS UNSIGNED) BETWEEN 30000 AND 60000 
+    THEN DATE_ADD('1899-12-30', INTERVAL CAST(posisi AS UNSIGNED) DAY)
+    WHEN posisi REGEXP '^[0-9]{4}-[0-9]{2}' 
+    THEN STR_TO_DATE(SUBSTRING(posisi, 1, 10), '%Y-%m-%d')
+    ELSE NULL 
+END)";
+
 $where = [
-    "posisi >= '2026-07-01'",
     "UPPER(COALESCE(kantor_kanwil, regional_office, '')) NOT LIKE '%KANPUS%'",
     "UPPER(COALESCE(kantor_kanwil, regional_office, '')) NOT LIKE '%KAMPUS%'"
 ];
 $params = [];
 
-if ($filterBulan !== '') {
-    $where[] = "posisi LIKE :bulan";
-    $params['bulan'] = $filterBulan . '%';
+if ($filterBulanNum !== null) {
+    $where[] = "$strMonthExpr = :bulan_num";
+    $params['bulan_num'] = $filterBulanNum;
 }
 
 $whereClause = ' WHERE ' . implode(' AND ', $where);

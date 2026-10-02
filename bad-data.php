@@ -8,26 +8,17 @@ require_once __DIR__ . '/includes/regions.php';
 
 $pdo = getDbConnection();
 
-$filterStatus = trim((string)($_GET['status'] ?? ''));
 $filterMonth  = trim((string)($_GET['month'] ?? ''));
 $filterRegion = trim((string)($_GET['region'] ?? ''));
 $search       = trim((string)($_GET['q'] ?? ''));
 
+$availableMonths = [
+    'Januari', 'Februari', 'Maret', 'April', 'Mei', 'Juni',
+    'Juli', 'Agustus', 'September', 'Oktober', 'November', 'Desember'
+];
+
 $where = [];
 $params = [];
-
-if ($filterStatus !== '') {
-    if (strtolower($filterStatus) === 'done') {
-        $where[] = "LOWER(TRIM(status)) = 'done'";
-    } elseif (strtolower($filterStatus) === 'open') {
-        $where[] = "LOWER(TRIM(status)) = 'open'";
-    } elseif (strtolower($filterStatus) === 'not done' || strtolower($filterStatus) === 'not_done') {
-        $where[] = "(status IS NULL OR LOWER(TRIM(status)) NOT IN ('done', 'open'))";
-    } else {
-        $where[] = "LOWER(TRIM(status)) = :filter_status";
-        $params['filter_status'] = strtolower($filterStatus);
-    }
-}
 
 if ($filterMonth !== '') {
     $where[] = "month LIKE :filter_month";
@@ -35,9 +26,9 @@ if ($filterMonth !== '') {
 }
 
 if ($filterRegion !== '') {
-    if (isset(MASTER_REGIONS[(int)$filterRegion])) {
-        $regName = MASTER_REGIONS[(int)$filterRegion];
-        $where[] = getRegionSqlCondition($regName, "region");
+    $cond = getRegionSqlCondition($filterRegion, "region");
+    if ($cond) {
+        $where[] = $cond;
     } else {
         $where[] = "region LIKE :filter_region";
         $params['filter_region'] = '%' . $filterRegion . '%';
@@ -45,8 +36,10 @@ if ($filterRegion !== '') {
 }
 
 if ($search !== '') {
-    $where[] = "(branch LIKE :search OR pic_rac LIKE :search OR keterangan LIKE :search)";
-    $params['search'] = '%' . $search . '%';
+    $where[] = "(branch LIKE :search_branch OR pic_rac LIKE :search_pic OR keterangan LIKE :search_ket)";
+    $params['search_branch'] = '%' . $search . '%';
+    $params['search_pic'] = '%' . $search . '%';
+    $params['search_ket'] = '%' . $search . '%';
 }
 
 $whereSql = !empty($where) ? 'WHERE ' . implode(' AND ', $where) : '';
@@ -60,7 +53,7 @@ $totalPages = max(1, (int)ceil($totalRecords / $perPage));
 $page = max(1, min($totalPages, (int)($_GET['page'] ?? 1)));
 $offset = ($page - 1) * $perPage;
 
-$dataSql = "SELECT * FROM bad_data {$whereSql} ORDER BY id DESC LIMIT :limit OFFSET :offset";
+$dataSql = "SELECT * FROM bad_data {$whereSql} ORDER BY CASE WHEN pic_rac IS NULL OR TRIM(pic_rac) = '' OR pic_rac = '-' THEN 1 ELSE 0 END, pic_rac ASC, id ASC LIMIT :limit OFFSET :offset";
 $dataStmt = $pdo->prepare($dataSql);
 foreach ($params as $key => $val) {
     $dataStmt->bindValue(':' . $key, $val);
@@ -70,29 +63,14 @@ $dataStmt->bindValue(':offset', $offset, PDO::PARAM_INT);
 $dataStmt->execute();
 $pageData = $dataStmt->fetchAll(PDO::FETCH_ASSOC);
 
-$availableMonths = [
-    'Januari', 'Februari', 'Maret', 'April', 'Mei', 'Juni',
-    'Juli', 'Agustus', 'September', 'Oktober', 'November', 'Desember'
-];
+require_once __DIR__ . '/includes/pic_rac_helper.php';
+$pageData = attachPicRacGroupAverages($pageData, 'persentase');
 
 if (!function_exists('buildBadDataPageUrl')) {
     function buildBadDataPageUrl(int $pageNumber): string {
         $query = $_GET;
         $query['page'] = $pageNumber;
         return 'bad-data.php?' . http_build_query($query);
-    }
-}
-
-if (!function_exists('renderBadDataBadge')) {
-    function renderBadDataBadge(string $status): string {
-        $st = strtolower(trim($status));
-        if ($st === 'done' || $st === 'selesai') {
-            return '<span class="badge badge-done">Done</span>';
-        }
-        if ($st === 'open' || $st === 'proses' || $st === 'in progress') {
-            return '<span class="badge badge-in-progress">' . htmlspecialchars($status !== '' ? $status : 'Open', ENT_QUOTES, 'UTF-8') . '</span>';
-        }
-        return '<span class="badge badge-not-started">' . htmlspecialchars($status !== '' ? $status : 'Not Done', ENT_QUOTES, 'UTF-8') . '</span>';
     }
 }
 
@@ -104,9 +82,9 @@ require_once __DIR__ . '/includes/sidebar.php';
     <div class="page-header" style="display:flex;justify-content:space-between;align-items:flex-start;gap:20px;">
         <div>
             <h2 class="page-title">Monitoring Bad Data</h2>
-            <div class="page-subtitle">Monitoring evaluasi, mutasi harian, dan perbaikan data RAC</div>
+            <div class="page-subtitle">Monitoring evaluasi dan perbaikan data RAC</div>
         </div>
-        <div style="display:flex;gap:8px;">
+        <div style="display:flex;gap:8px;flex-wrap:wrap;">
             <a href="import-bad-data.php" class="btn btn-secondary btn-sm" style="display:inline-flex;align-items:center;gap:6px;">
                 <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                     <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
@@ -115,20 +93,16 @@ require_once __DIR__ . '/includes/sidebar.php';
                 </svg>
                 Import Excel / CSV
             </a>
+            <?php if ($totalRecords > 0): ?>
+                <button type="button" class="btn btn-danger btn-sm" id="btnResetBadData" onclick="openResetModal()">
+                    Reset Seluruh Data
+                </button>
+            <?php endif; ?>
         </div>
     </div>
 
+    <!-- FILTER -->
     <form method="GET" action="bad-data.php" class="filter-card">
-        <div class="filter-item">
-            <label for="filterStatus" class="filter-label">Filter Status</label>
-            <select id="filterStatus" name="status" class="form-control">
-                <option value="">Semua Status</option>
-                <option value="Done" <?= $filterStatus === 'Done' ? 'selected' : '' ?>>Done</option>
-                <option value="Open" <?= $filterStatus === 'Open' ? 'selected' : '' ?>>Open</option>
-                <option value="Not Done" <?= $filterStatus === 'Not Done' ? 'selected' : '' ?>>Not Done</option>
-            </select>
-        </div>
-
         <div class="filter-item">
             <label for="filterMonth" class="filter-label">Posisi Bulan</label>
             <select id="filterMonth" name="month" class="form-control">
@@ -142,9 +116,9 @@ require_once __DIR__ . '/includes/sidebar.php';
         </div>
 
         <div class="filter-item" style="min-width:220px;">
-            <label for="filterRegion" class="filter-label">Filter Region</label>
+            <label for="filterRegion" class="filter-label">Filter Regional</label>
             <select id="filterRegion" name="region" class="form-control">
-                <option value="">Semua Region</option>
+                <option value="">Semua Regional</option>
                 <?php foreach (MASTER_REGIONS as $regionNumber => $regionName): ?>
                     <option value="<?= (int)$regionNumber ?>" <?= $filterRegion === (string)$regionNumber ? 'selected' : '' ?>>
                         <?= htmlspecialchars((string)$regionName, ENT_QUOTES, 'UTF-8') ?>
@@ -160,17 +134,26 @@ require_once __DIR__ . '/includes/sidebar.php';
                 id="filterSearch"
                 name="q"
                 class="form-control"
-                placeholder="Cari Branch / PIC RAC / Keterangan..."
+                placeholder="Cari Unit Kerja / PIC RAC..."
                 value="<?= htmlspecialchars($search, ENT_QUOTES, 'UTF-8') ?>"
             >
         </div>
 
         <div class="filter-actions">
             <button type="submit" class="btn btn-primary">Terapkan Filter</button>
-            <a href="bad-data.php" class="btn btn-secondary">Reset</a>
+            <a href="bad-data.php" class="btn btn-secondary">Reset Filter</a>
         </div>
     </form>
 
+    <!-- BULK ACTIONS -->
+    <div id="bulkActions" style="display:none;margin-bottom:12px;padding:10px 14px;background:#fef2f2;border:1px solid #fecaca;border-radius:6px;align-items:center;justify-content:space-between;">
+        <span id="selectedCountText" style="font-size:13px;color:#991b1b;font-weight:600;">0 data dipilih</span>
+        <button type="button" class="btn btn-danger btn-sm" onclick="deleteSelectedBadData()">
+            Hapus Data Terpilih
+        </button>
+    </div>
+
+    <!-- TABLE -->
     <div class="table-wrapper">
         <div class="table-scroll">
             <table class="data-table">
@@ -182,24 +165,21 @@ require_once __DIR__ . '/includes/sidebar.php';
                                 id="checkAllBadData"
                                 title="Pilih Semua di Halaman Ini"
                                 style="cursor:pointer;width:16px;height:16px;"
+                                <?= empty($pageData) ? 'disabled' : '' ?>
                             >
                         </th>
-                        <th>NO</th>
-                        <th>BRANCH OFFICE</th>
-                        <th>TOTAL CIF</th>
-                        <th>BAD DATA (LALU)</th>
-                        <th>BAD DATA (KINI)</th>
+                        <th style="width:50px;text-align:center;">NO</th>
+                        <th>UNIT KERJA</th>
+                        <th>PIC RAC</th>
                         <th>% BAD DATA</th>
-                        <th>PERBAIKAN</th>
-                        <th>BAD DATA BARU</th>
-                        <th>STATUS</th>
-                        <th>KETERANGAN</th>
+                        <th>AVERAGE</th>
+                        <th style="width:70px;text-align:center;">AKSI</th>
                     </tr>
                 </thead>
                 <tbody>
                     <?php if (empty($pageData)): ?>
                         <tr>
-                            <td colspan="11" style="text-align:center;padding:40px;color:var(--text-muted);">
+                            <td colspan="7" style="text-align:center;padding:40px;color:var(--text-muted);">
                                 Belum ada data bad data yang sesuai filter.
                             </td>
                         </tr>
@@ -212,37 +192,28 @@ require_once __DIR__ . '/includes/sidebar.php';
                                         class="bad-data-check"
                                         value="<?= htmlspecialchars((string)($row['id'] ?? ''), ENT_QUOTES, 'UTF-8') ?>"
                                         style="cursor:pointer;width:16px;height:16px;"
+                                        onchange="updateBulkActionState()"
                                     >
                                 </td>
-                                <td>
-                                    <?= htmlspecialchars((string)($row['no_urut'] ?: ($offset + $index + 1)), ENT_QUOTES, 'UTF-8') ?>
+                                <td style="text-align:center;">
+                                    <?= (int)($offset + $index + 1) ?>
                                 </td>
                                 <td>
                                     <strong><?= htmlspecialchars((string)($row['branch'] ?? '-'), ENT_QUOTES, 'UTF-8') ?></strong>
                                 </td>
                                 <td>
-                                    <?= htmlspecialchars((string)($row['total_cif'] ?? '-'), ENT_QUOTES, 'UTF-8') ?>
-                                </td>
-                                <td>
-                                    <?= htmlspecialchars((string)($row['bad_data_prev'] ?? '-'), ENT_QUOTES, 'UTF-8') ?>
-                                </td>
-                                <td>
-                                    <?= htmlspecialchars((string)($row['bad_data_curr'] ?? $row['average'] ?? '-'), ENT_QUOTES, 'UTF-8') ?>
+                                    <?= htmlspecialchars((string)($row['pic_rac'] ?? '-'), ENT_QUOTES, 'UTF-8') ?>
                                 </td>
                                 <td>
                                     <strong><?= htmlspecialchars((string)($row['persentase'] ?? '0%'), ENT_QUOTES, 'UTF-8') ?></strong>
                                 </td>
-                                <td style="color:#15803d;font-weight:600;">
-                                    <?= htmlspecialchars((string)($row['perbaikan_bad_data'] ?? '-'), ENT_QUOTES, 'UTF-8') ?>
-                                </td>
-                                <td style="color:#b91c1c;font-weight:600;">
-                                    <?= htmlspecialchars((string)($row['bad_data_baru'] ?? '-'), ENT_QUOTES, 'UTF-8') ?>
-                                </td>
-                                <td>
-                                    <?= renderBadDataBadge((string)($row['status'] ?? '')) ?>
-                                </td>
-                                <td>
-                                    <?= htmlspecialchars((string)($row['keterangan'] ?: ($row['month'] ?? '-')), ENT_QUOTES, 'UTF-8') ?>
+                                <?php if (!empty($row['is_first_in_pic_group'])): ?>
+                                    <td <?= ($row['pic_group_rowspan'] > 1) ? 'rowspan="' . (int)$row['pic_group_rowspan'] . '"' : '' ?> style="text-align:center;font-weight:700;vertical-align:middle;<?= ($row['pic_group_rowspan'] > 1) ? 'background:#f8fafc;' : '' ?>">
+                                        <?= htmlspecialchars((string)($row['pic_group_average'] ?? '-'), ENT_QUOTES, 'UTF-8') ?>
+                                    </td>
+                                <?php endif; ?>
+                                <td style="text-align:center;">
+                                    <button type="button" class="btn btn-danger btn-sm" onclick="deleteSingleBadData(<?= (int)$row['id'] ?>)" title="Hapus baris ini">Hapus</button>
                                 </td>
                             </tr>
                         <?php endforeach; ?>
@@ -251,10 +222,11 @@ require_once __DIR__ . '/includes/sidebar.php';
             </table>
         </div>
 
+        <?php if ($totalRecords > 0): ?>
         <div class="table-pagination">
             <div class="pagination-info">
                 Menampilkan
-                <strong><?= $totalRecords > 0 ? $offset + 1 : 0 ?> - <?= min($offset + count($pageData), $totalRecords) ?></strong>
+                <strong><?= $offset + 1 ?> - <?= min($offset + count($pageData), $totalRecords) ?></strong>
                 dari
                 <strong><?= $totalRecords ?></strong>
                 data
@@ -298,22 +270,137 @@ require_once __DIR__ . '/includes/sidebar.php';
                 </li>
             </ul>
         </div>
+        <?php endif; ?>
     </div>
 </main>
 
+<!-- MODAL RESET KONFIRMASI -->
+<div id="resetModal" style="display:none;position:fixed;inset:0;background:rgba(15,23,42,0.6);z-index:9999;align-items:center;justify-content:center;padding:20px;">
+    <div style="background:#ffffff;border-radius:10px;max-width:440px;width:100%;padding:24px;box-shadow:0 20px 25px -5px rgba(0,0,0,0.2);">
+        <h3 style="margin:0 0 10px;font-size:18px;color:#0f172a;font-weight:700;">Konfirmasi Reset Data</h3>
+        <p style="margin:0 0 20px;font-size:14px;color:#475569;line-height:1.5;">
+            Apakah Anda yakin ingin mereset seluruh data Bad Data? Seluruh baris yang tersimpan akan dihapus secara permanen.
+        </p>
+        <div style="display:flex;justify-content:flex-end;gap:10px;">
+            <button type="button" class="btn btn-secondary" onclick="closeResetModal()">Batal</button>
+            <button type="button" class="btn btn-danger" id="btnConfirmReset" onclick="executeResetBadData()">Ya, Hapus Semua</button>
+        </div>
+    </div>
+</div>
+
 <script>
 document.addEventListener('DOMContentLoaded', function () {
-    const checkAllBadData = document.getElementById('checkAllBadData');
-    if (checkAllBadData) {
-        checkAllBadData.addEventListener('change', function () {
+    const checkAll = document.getElementById('checkAllBadData');
+    if (checkAll) {
+        checkAll.addEventListener('change', function () {
             const checkboxes = document.querySelectorAll('.bad-data-check');
             checkboxes.forEach(function (checkbox) {
-                checkbox.checked = checkAllBadData.checked;
+                checkbox.checked = checkAll.checked;
             });
+            updateBulkActionState();
         });
     }
 });
+
+function updateBulkActionState() {
+    const checked = document.querySelectorAll('.bad-data-check:checked');
+    const bulkDiv = document.getElementById('bulkActions');
+    const countText = document.getElementById('selectedCountText');
+    if (!bulkDiv || !countText) return;
+
+    if (checked.length > 0) {
+        bulkDiv.style.display = 'flex';
+        countText.textContent = checked.length + ' data dipilih';
+    } else {
+        bulkDiv.style.display = 'none';
+    }
+}
+
+function openResetModal() {
+    const modal = document.getElementById('resetModal');
+    if (modal) modal.style.display = 'flex';
+}
+
+function closeResetModal() {
+    const modal = document.getElementById('resetModal');
+    if (modal) modal.style.display = 'none';
+}
+
+async function executeResetBadData() {
+    const btn = document.getElementById('btnConfirmReset');
+    if (btn) {
+        btn.disabled = true;
+        btn.textContent = 'Menghapus...';
+    }
+
+    try {
+        const response = await fetch('api/bad-data.php?action=clear', { method: 'POST' });
+        const result = await response.json();
+        if (!result.success) {
+            alert(result.message || 'Gagal mereset data.');
+            return;
+        }
+        window.location.reload();
+    } catch (err) {
+        alert('Terjadi kesalahan saat mereset data.');
+    } finally {
+        if (btn) {
+            btn.disabled = false;
+            btn.textContent = 'Ya, Hapus Semua';
+        }
+    }
+}
+
+async function deleteSelectedBadData() {
+    const checked = Array.from(document.querySelectorAll('.bad-data-check:checked')).map(cb => cb.value);
+    if (!checked.length) {
+        alert('Pilih setidaknya satu data yang ingin dihapus.');
+        return;
+    }
+
+    if (!confirm('Apakah Anda yakin ingin menghapus ' + checked.length + ' data terpilih?')) {
+        return;
+    }
+
+    try {
+        const response = await fetch('api/bad-data.php?action=delete', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ ids: checked })
+        });
+        const result = await response.json();
+        if (!result.success) {
+            alert(result.message || 'Gagal menghapus data.');
+            return;
+        }
+        window.location.reload();
+    } catch (err) {
+        alert('Terjadi kesalahan saat menghapus data terpilih.');
+    }
+}
+
+async function deleteSingleBadData(id) {
+    if (!id) return;
+    if (!confirm('Apakah Anda yakin ingin menghapus data baris ini secara permanen?')) {
+        return;
+    }
+
+    try {
+        const response = await fetch('api/bad-data.php?action=delete', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ ids: [id] })
+        });
+        const result = await response.json();
+        if (!result.success) {
+            alert(result.message || 'Gagal menghapus data.');
+            return;
+        }
+        window.location.reload();
+    } catch (err) {
+        alert('Terjadi kesalahan saat menghapus data.');
+    }
+}
 </script>
 
-<?php
-require_once __DIR__ . '/includes/footer.php';
+<?php require_once __DIR__ . '/includes/footer.php'; ?>

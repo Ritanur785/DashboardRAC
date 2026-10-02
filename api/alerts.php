@@ -223,5 +223,45 @@ if ($action === 'import' && $_SERVER['REQUEST_METHOD'] === 'POST') {
     exit;
 }
 
+if ($action === 'clear' && $_SERVER['REQUEST_METHOD'] === 'POST') {
+    try {
+        $pdo->exec('TRUNCATE TABLE str_alerts');
+        echo json_encode(['success' => true, 'message' => 'Seluruh data alert STR berhasil direset.']);
+        exit;
+    } catch (Throwable $e) {
+        http_response_code(500);
+        echo json_encode(['success' => false, 'error' => 'Gagal mereset data: ' . $e->getMessage()]);
+        exit;
+    }
+}
+
+if ($action === 'delete' && $_SERVER['REQUEST_METHOD'] === 'POST') {
+    $input = json_decode(file_get_contents('php://input'), true) ?? $_POST;
+    $ids = $input['ids'] ?? ($input['id'] ?? []);
+    if (!is_array($ids)) {
+        $ids = [$ids];
+    }
+    $ids = array_values(array_unique(array_filter(array_map('intval', $ids))));
+
+    if (empty($ids)) {
+        http_response_code(400);
+        echo json_encode(['success' => false, 'error' => 'Tidak ada data yang dipilih untuk dihapus.']);
+        exit;
+    }
+
+    try {
+        $placeholders = implode(',', array_fill(0, count($ids), '?'));
+        $stmt = $pdo->prepare("DELETE FROM str_alerts WHERE id IN ({$placeholders})");
+        $stmt->execute($ids);
+        $count = $stmt->rowCount();
+        echo json_encode(['success' => true, 'count' => $count, 'message' => "{$count} data alert STR berhasil dihapus."]);
+        exit;
+    } catch (Throwable $e) {
+        http_response_code(500);
+        echo json_encode(['success' => false, 'error' => 'Gagal menghapus data: ' . $e->getMessage()]);
+        exit;
+    }
+}
+
 http_response_code(400);
 echo json_encode(['success' => false, 'error' => 'Invalid action']);

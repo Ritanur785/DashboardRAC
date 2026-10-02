@@ -8,1036 +8,450 @@ require_once __DIR__ . '/includes/regions.php';
 
 $pdo = getDbConnection();
 
-$filterStatus = trim((string)($_GET['status'] ?? ''));
+// Auto-create table pengkinian_data if not exists
+try {
+    $pdo->exec("
+        CREATE TABLE IF NOT EXISTS pengkinian_data (
+            id INT AUTO_INCREMENT PRIMARY KEY,
+            no_urut VARCHAR(50) NULL,
+            branch VARCHAR(150) NOT NULL,
+            pic_rac VARCHAR(150) NULL,
+            persentase VARCHAR(50) NULL,
+            average VARCHAR(50) NULL,
+            status VARCHAR(50) DEFAULT 'Open',
+            month VARCHAR(50) NULL,
+            region VARCHAR(100) NULL,
+            total_cif VARCHAR(50) NULL,
+            total VARCHAR(50) NULL,
+            reguler VARCHAR(50) NULL,
+            kerjasama VARCHAR(50) NULL,
+            pengkinian_prev VARCHAR(50) NULL,
+            persentase_prev VARCHAR(50) NULL,
+            pengkinian_curr VARCHAR(50) NULL,
+            persentase_curr VARCHAR(50) NULL,
+            perbaikan_data VARCHAR(50) NULL,
+            data_baru VARCHAR(50) NULL,
+            keterangan TEXT NULL,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+            INDEX idx_branch (branch),
+            INDEX idx_status (status),
+            INDEX idx_month (month),
+            INDEX idx_region (region)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+    ");
+} catch (Throwable $e) {
+    // Ignore if table exists or permission issue
+}
+
 $filterMonth  = trim((string)($_GET['month'] ?? ''));
 $filterRegion = trim((string)($_GET['region'] ?? ''));
 $search       = trim((string)($_GET['q'] ?? ''));
 
-$perPage = 50;
-
-/*
-|--------------------------------------------------------------------------
-| Data sementara
-|--------------------------------------------------------------------------
-| Data akan dihubungkan dengan database pada tahap import.
-|--------------------------------------------------------------------------
-*/
-
-$data = [];
-
-/*
-|--------------------------------------------------------------------------
-| Daftar bulan
-|--------------------------------------------------------------------------
-*/
-
 $availableMonths = [
-    'Januari',
-    'Februari',
-    'Maret',
-    'April',
-    'Mei',
-    'Juni',
-    'Juli',
-    'Agustus',
-    'September',
-    'Oktober',
-    'November',
-    'Desember'
+    'Januari', 'Februari', 'Maret', 'April', 'Mei', 'Juni',
+    'Juli', 'Agustus', 'September', 'Oktober', 'November', 'Desember'
 ];
 
-/*
-|--------------------------------------------------------------------------
-| Pagination
-|--------------------------------------------------------------------------
-*/
+$perPage = 50;
 
-$totalRecords = count($data);
+$where = [];
+$params = [];
 
-$totalPages = max(
-    1,
-    (int)ceil($totalRecords / $perPage)
-);
+if ($filterMonth !== '') {
+    $where[] = "month LIKE :filter_month";
+    $params['filter_month'] = '%' . $filterMonth . '%';
+}
 
-$page = max(
-    1,
-    min(
-        $totalPages,
-        (int)($_GET['page'] ?? 1)
-    )
-);
-
-$offset = ($page - 1) * $perPage;
-
-$pageData = array_slice(
-    $data,
-    $offset,
-    $perPage
-);
-
-/*
-|--------------------------------------------------------------------------
-| URL Pagination
-|--------------------------------------------------------------------------
-*/
-
-if (!function_exists('buildPengkinianPageUrl')) {
-
-    function buildPengkinianPageUrl(
-        int $pageNumber
-    ): string {
-
-        $query = $_GET;
-
-        $query['page'] = $pageNumber;
-
-        return 'pengkinian-data.php?' .
-            http_build_query($query);
+if ($filterRegion !== '') {
+    $cond = getRegionSqlCondition($filterRegion, "region");
+    if ($cond) {
+        $where[] = $cond;
+    } else {
+        $where[] = "region LIKE :filter_region";
+        $params['filter_region'] = '%' . $filterRegion . '%';
     }
 }
 
-/*
-|--------------------------------------------------------------------------
-| Header & Sidebar
-|--------------------------------------------------------------------------
-*/
+if ($search !== '') {
+    $where[] = '(branch LIKE :search_branch OR pic_rac LIKE :search_pic OR keterangan LIKE :search_ket)';
+    $params['search_branch'] = '%' . $search . '%';
+    $params['search_pic'] = '%' . $search . '%';
+    $params['search_ket'] = '%' . $search . '%';
+}
+
+$whereSql = !empty($where) ? 'WHERE ' . implode(' AND ', $where) : '';
+
+$countSql = "SELECT COUNT(*) FROM pengkinian_data {$whereSql}";
+$countStmt = $pdo->prepare($countSql);
+$countStmt->execute($params);
+$totalRecords = (int)$countStmt->fetchColumn();
+
+$totalPages = max(1, (int)ceil($totalRecords / $perPage));
+$page = max(1, min($totalPages, (int)($_GET['page'] ?? 1)));
+$offset = ($page - 1) * $perPage;
+
+$dataSql = "SELECT * FROM pengkinian_data {$whereSql} ORDER BY CASE WHEN pic_rac IS NULL OR TRIM(pic_rac) = '' OR pic_rac = '-' THEN 1 ELSE 0 END, pic_rac ASC, id ASC LIMIT :offset, :perPage";
+$dataStmt = $pdo->prepare($dataSql);
+foreach ($params as $k => $v) {
+    $dataStmt->bindValue(':' . $k, $v);
+}
+$dataStmt->bindValue(':offset', $offset, PDO::PARAM_INT);
+$dataStmt->bindValue(':perPage', $perPage, PDO::PARAM_INT);
+$dataStmt->execute();
+$pageData = $dataStmt->fetchAll(PDO::FETCH_ASSOC);
+
+require_once __DIR__ . '/includes/pic_rac_helper.php';
+$pageData = attachPicRacGroupAverages($pageData, 'persentase');
+
+if (!function_exists('buildPengkinianPageUrl')) {
+    function buildPengkinianPageUrl(int $pageNumber): string {
+        $query = $_GET;
+        $query['page'] = $pageNumber;
+        return 'Pengkinian_data.php?' . http_build_query($query);
+    }
+}
+
+if (!function_exists('renderPengkinianBadge')) {
+    function renderPengkinianBadge(string $status): string {
+        $st = strtolower(trim($status));
+        if ($st === 'done' || $st === 'selesai') {
+            return '<span class="badge badge-done">Done</span>';
+        }
+        if ($st === 'open' || $st === 'proses' || $st === 'in progress') {
+            return '<span class="badge badge-in-progress">' . htmlspecialchars($status !== '' ? $status : 'Open', ENT_QUOTES, 'UTF-8') . '</span>';
+        }
+        return '<span class="badge badge-not-started">' . htmlspecialchars($status !== '' ? $status : 'Not Done', ENT_QUOTES, 'UTF-8') . '</span>';
+    }
+}
 
 require_once __DIR__ . '/includes/header.php';
 require_once __DIR__ . '/includes/sidebar.php';
-
 ?>
 
 <main class="main-content">
-
-    <!-- =========================================================
-         PAGE HEADER
-    ========================================================== -->
-
-    <div
-        class="page-header"
-        style="
-            display:flex;
-            justify-content:space-between;
-            align-items:flex-start;
-            gap:20px;
-        "
-    >
-
+    <div class="page-header" style="display:flex;justify-content:space-between;align-items:flex-start;gap:20px;">
         <div>
-
-            <h2 class="page-title">
-                Pengkinian Data
-            </h2>
-
-            <div class="page-subtitle">
-                Monitoring dan pengkinian data PEP
-            </div>
-
+            <h2 class="page-title">Pengkinian Data</h2>
+            <div class="page-subtitle">Monitoring dan pengkinian data PEP</div>
         </div>
-
-
-        <!-- =====================================================
-             BUTTON IMPORT
-        ====================================================== -->
-
-        <div>
-
-            <button
-                type="button"
-                class="btn btn-sm"
-                id="btnImportPengkinian"
-                onclick="openImportPengkinian()"
-                style="
-                    background:#ffffff;
-                    color:#333333;
-                    border:1px solid #d1d5db;
-                    box-shadow:none;
-                "
-            >
-                Import Excel/CSV
-            </button>
-
-            <input
-                type="file"
-                id="fileImportPengkinian"
-                accept=".xlsx,.xls,.csv"
-                style="display:none;"
-                onchange="handleImportPengkinian(this)"
-            >
-
+        <div style="display:flex;gap:8px;flex-wrap:wrap;">
+            <a href="import-pengkinian-data.php" class="btn btn-secondary btn-sm" style="display:inline-flex;align-items:center;gap:6px;">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+                    <polyline points="17 8 12 3 7 8"></polyline>
+                    <line x1="12" y1="3" x2="12" y2="15"></line>
+                </svg>
+                Import Excel / CSV
+            </a>
+            <?php if ($totalRecords > 0): ?>
+                <button type="button" class="btn btn-danger btn-sm" id="btnResetPengkinian" onclick="openResetModal()">
+                    Reset Seluruh Data
+                </button>
+            <?php endif; ?>
         </div>
-
     </div>
 
-
-    <!-- =========================================================
-         FILTER
-    ========================================================== -->
-
-    <form
-        method="GET"
-        action="./pengkinian-data.php"
-        class="filter-card"
-    >
-
-        <!-- STATUS -->
-
+    <!-- FILTER -->
+    <form method="GET" action="Pengkinian_data.php" class="filter-card">
         <div class="filter-item">
-
-            <label
-                for="filterStatus"
-                class="filter-label"
-            >
-                Status
-            </label>
-
-            <select
-                id="filterStatus"
-                name="status"
-                class="form-control"
-            >
-
-                <option value="">
-                    Semua Status
-                </option>
-
-                <option
-                    value="Done"
-                    <?= $filterStatus === 'Done'
-                        ? 'selected'
-                        : '' ?>
-                >
-                    Done
-                </option>
-
-                <option
-                    value="Not Done"
-                    <?= $filterStatus === 'Not Done'
-                        ? 'selected'
-                        : '' ?>
-                >
-                    Not Done
-                </option>
-
-            </select>
-
-        </div>
-
-
-        <!-- BULAN -->
-
-        <div class="filter-item">
-
-            <label
-                for="filterMonth"
-                class="filter-label"
-            >
-                Posisi Bulan
-            </label>
-
-            <select
-                id="filterMonth"
-                name="month"
-                class="form-control"
-            >
-
-                <option value="">
-                    Semua Bulan
-                </option>
-
-                <?php foreach (
-                    $availableMonths as $month
-                ): ?>
-
-                    <option
-                        value="<?= htmlspecialchars(
-                            $month,
-                            ENT_QUOTES,
-                            'UTF-8'
-                        ) ?>"
-                        <?= $filterMonth === $month
-                            ? 'selected'
-                            : '' ?>
-                    >
-                        <?= htmlspecialchars(
-                            $month,
-                            ENT_QUOTES,
-                            'UTF-8'
-                        ) ?>
+            <label for="filterMonth" class="filter-label">Posisi Bulan</label>
+            <select id="filterMonth" name="month" class="form-control">
+                <option value="">Semua Bulan</option>
+                <?php foreach ($availableMonths as $month): ?>
+                    <option value="<?= htmlspecialchars($month, ENT_QUOTES, 'UTF-8') ?>" <?= $filterMonth === $month ? 'selected' : '' ?>>
+                        <?= htmlspecialchars($month, ENT_QUOTES, 'UTF-8') ?>
                     </option>
-
                 <?php endforeach; ?>
-
             </select>
-
         </div>
 
-
-        <!-- REGION -->
-
-        <div
-            class="filter-item"
-            style="min-width:220px;"
-        >
-
-            <label
-                for="filterRegion"
-                class="filter-label"
-            >
-                Filter Region
-            </label>
-
-            <select
-                id="filterRegion"
-                name="region"
-                class="form-control"
-            >
-
-                <option value="">
-                    Semua Region
-                </option>
-
-                <?php foreach (
-                    MASTER_REGIONS
-                    as $regionNumber => $regionName
-                ): ?>
-
-                    <option
-                        value="<?= (int)$regionNumber ?>"
-                        <?= $filterRegion ===
-                            (string)$regionNumber
-                            ? 'selected'
-                            : '' ?>
-                    >
-                        <?= htmlspecialchars(
-                            (string)$regionName,
-                            ENT_QUOTES,
-                            'UTF-8'
-                        ) ?>
+        <div class="filter-item" style="min-width:220px;">
+            <label for="filterRegion" class="filter-label">Filter Regional</label>
+            <select id="filterRegion" name="region" class="form-control">
+                <option value="">Semua Regional</option>
+                <?php foreach (MASTER_REGIONS as $regionNumber => $regionName): ?>
+                    <option value="<?= (int)$regionNumber ?>" <?= $filterRegion === (string)$regionNumber ? 'selected' : '' ?>>
+                        <?= htmlspecialchars((string)$regionName, ENT_QUOTES, 'UTF-8') ?>
                     </option>
-
                 <?php endforeach; ?>
-
             </select>
-
         </div>
 
-
-        <!-- PENCARIAN -->
-
-        <div
-            class="filter-item"
-            style="
-                flex:1;
-                min-width:220px;
-            "
-        >
-
-            <label
-                for="filterSearch"
-                class="filter-label"
-            >
-                Pencarian
-            </label>
-
+        <div class="filter-item" style="flex:1;min-width:220px;">
+            <label for="filterSearch" class="filter-label">Pencarian</label>
             <input
                 type="text"
                 id="filterSearch"
                 name="q"
                 class="form-control"
-                placeholder="Cari nama PIC RAC / Unit Kerja..."
-                value="<?= htmlspecialchars(
-                    $search,
-                    ENT_QUOTES,
-                    'UTF-8'
-                ) ?>"
+                placeholder="Cari Unit Kerja / PIC RAC..."
+                value="<?= htmlspecialchars($search, ENT_QUOTES, 'UTF-8') ?>"
             >
-
         </div>
-
-
-        <!-- ACTION FILTER -->
 
         <div class="filter-actions">
-
-            <button
-                type="submit"
-                class="btn btn-primary"
-            >
-                Terapkan Filter
-            </button>
-
-            <a
-                href="./pengkinian-data.php"
-                class="btn btn-secondary"
-            >
-                Reset
-            </a>
-
+            <button type="submit" class="btn btn-primary">Terapkan Filter</button>
+            <a href="Pengkinian_data.php" class="btn btn-secondary">Reset Filter</a>
         </div>
-
     </form>
 
+    <!-- BULK ACTIONS -->
+    <div id="bulkActions" style="display:none;margin-bottom:12px;padding:10px 14px;background:#fef2f2;border:1px solid #fecaca;border-radius:6px;align-items:center;justify-content:space-between;">
+        <span id="selectedCountText" style="font-size:13px;color:#991b1b;font-weight:600;">0 data dipilih</span>
+        <button type="button" class="btn btn-danger btn-sm" onclick="deleteSelectedPengkinian()">
+            Hapus Data Terpilih
+        </button>
+    </div>
 
-    <!-- =========================================================
-         TABLE
-    ========================================================== -->
-
+    <!-- TABLE -->
     <div class="table-wrapper">
-
         <div class="table-scroll">
-
             <table class="data-table">
-
                 <thead>
-
                     <tr>
                         <th style="width:38px;text-align:center;">
                             <input
                                 type="checkbox"
-                                id="checkAllAlerts"
+                                id="checkAllPengkinian"
                                 title="Pilih Semua di Halaman Ini"
-                                style="
-                                    cursor:pointer;
-                                    width:16px;
-                                    height:16px;
-                                "
+                                style="cursor:pointer;width:16px;height:16px;"
+                                <?= empty($pageData) ? 'disabled' : '' ?>
                             >
                         </th>
-
-                        <th>BRANCH</th>
+                        <th style="width:50px;text-align:center;">NO</th>
+                        <th>UNIT KERJA</th>
                         <th>PIC RAC</th>
-                        <th>%Pengkinian Data</th>
-                        <th>Avarage</th>
+                        <th>% PENGKINIAN DATA</th>
+                        <th>AVERAGE</th>
+                        <th style="width:70px;text-align:center;">AKSI</th>
                     </tr>
-
                 </thead>
-
-
                 <tbody>
-
-                    <?php if (
-                        empty($pageData)
-                    ): ?>
-
+                    <?php if (empty($pageData)): ?>
                         <tr>
-
-                            <td
-                                colspan="10"
-                                style="
-                                    text-align:center;
-                                    padding:40px;
-                                    color:var(--text-muted);
-                                "
-                            >
-                                Belum ada data pengkinian.
+                            <td colspan="7" style="text-align:center;padding:40px;color:var(--text-muted);">
+                                Belum ada data pengkinian data yang sesuai filter.
                             </td>
-
                         </tr>
-
                     <?php else: ?>
-
-                        <?php foreach (
-                            $pageData
-                            as $index => $row
-                        ): ?>
-
+                        <?php foreach ($pageData as $index => $row): ?>
                             <tr>
-
-                                <td>
-                                    <?= $offset +
-                                        $index +
-                                        1 ?>
-                                </td>
-
-                                <td>
-
-                                    <?= htmlspecialchars(
-                                        (string)(
-                                            $row['posisi']
-                                            ?? '-'
-                                        ),
-                                        ENT_QUOTES,
-                                        'UTF-8'
-                                    ) ?>
-
-                                </td>
-
-                                <td>
-
-                                    <strong>
-
-                                        <?= htmlspecialchars(
-                                            (string)(
-                                                $row[
-                                                    'nama_lengkap'
-                                                ] ?? '-'
-                                            ),
-                                            ENT_QUOTES,
-                                            'UTF-8'
-                                        ) ?>
-
-                                    </strong>
-
-                                </td>
-
-                                <td>
-
-                                    <?= htmlspecialchars(
-                                        (string)(
-                                            $row['cif']
-                                            ?? '-'
-                                        ),
-                                        ENT_QUOTES,
-                                        'UTF-8'
-                                    ) ?>
-
-                                </td>
-
-                                <td>
-
-                                    <?= htmlspecialchars(
-                                        (string)(
-                                            $row['nik']
-                                            ?? '-'
-                                        ),
-                                        ENT_QUOTES,
-                                        'UTF-8'
-                                    ) ?>
-
-                                </td>
-
-                                <td>
-
-                                    <?= htmlspecialchars(
-                                        (string)(
-                                            $row[
-                                                'unit_kerja'
-                                            ] ?? '-'
-                                        ),
-                                        ENT_QUOTES,
-                                        'UTF-8'
-                                    ) ?>
-
-                                </td>
-
-                                <td>
-
-                                    <?= htmlspecialchars(
-                                        (string)(
-                                            $row['region']
-                                            ?? '-'
-                                        ),
-                                        ENT_QUOTES,
-                                        'UTF-8'
-                                    ) ?>
-
-                                </td>
-
-                                <td>
-
-                                    <?= htmlspecialchars(
-                                        (string)(
-                                            $row[
-                                                'tanggal_pengkinian'
-                                            ] ?? '-'
-                                        ),
-                                        ENT_QUOTES,
-                                        'UTF-8'
-                                    ) ?>
-
-                                </td>
-
-                                <td>
-
-                                    <?php
-
-                                    $status = (string)(
-                                        $row['status']
-                                        ?? 'Not Done'
-                                    );
-
-                                    $statusClass =
-                                        strtolower(
-                                            trim($status)
-                                        ) === 'done'
-                                            ? 'badge-done'
-                                            : 'badge-not-started';
-
-                                    ?>
-
-                                    <span
-                                        class="badge <?= htmlspecialchars(
-                                            $statusClass,
-                                            ENT_QUOTES,
-                                            'UTF-8'
-                                        ) ?>"
+                                <td style="text-align:center;">
+                                    <input
+                                        type="checkbox"
+                                        class="pengkinian-check"
+                                        value="<?= htmlspecialchars((string)($row['id'] ?? ''), ENT_QUOTES, 'UTF-8') ?>"
+                                        style="cursor:pointer;width:16px;height:16px;"
+                                        onchange="updateBulkActionState()"
                                     >
-
-                                        <?= htmlspecialchars(
-                                            $status,
-                                            ENT_QUOTES,
-                                            'UTF-8'
-                                        ) ?>
-
-                                    </span>
-
                                 </td>
-
+                                <td style="text-align:center;">
+                                    <?= (int)($offset + $index + 1) ?>
+                                </td>
                                 <td>
-
-                                    <button
-                                        type="button"
-                                        class="
-                                            btn
-                                            btn-secondary
-                                            btn-sm
-                                        "
-                                        onclick="openImportPengkinian()"
-                                    >
-                                        Update
-                                    </button>
-
+                                    <strong><?= htmlspecialchars((string)($row['branch'] ?? '-'), ENT_QUOTES, 'UTF-8') ?></strong>
                                 </td>
-
+                                <td>
+                                    <?= htmlspecialchars((string)($row['pic_rac'] ?? '-'), ENT_QUOTES, 'UTF-8') ?>
+                                </td>
+                                <td>
+                                    <strong><?= htmlspecialchars((string)($row['persentase'] ?? '0%'), ENT_QUOTES, 'UTF-8') ?></strong>
+                                </td>
+                                <?php if (!empty($row['is_first_in_pic_group'])): ?>
+                                    <td <?= ($row['pic_group_rowspan'] > 1) ? 'rowspan="' . (int)$row['pic_group_rowspan'] . '"' : '' ?> style="text-align:center;font-weight:700;vertical-align:middle;<?= ($row['pic_group_rowspan'] > 1) ? 'background:#f8fafc;' : '' ?>">
+                                        <?= htmlspecialchars((string)($row['pic_group_average'] ?? '-'), ENT_QUOTES, 'UTF-8') ?>
+                                    </td>
+                                <?php endif; ?>
+                                <td style="text-align:center;">
+                                    <button type="button" class="btn btn-danger btn-sm" onclick="deleteSinglePengkinian(<?= (int)$row['id'] ?>)" title="Hapus baris ini">Hapus</button>
+                                </td>
                             </tr>
-
                         <?php endforeach; ?>
-
                     <?php endif; ?>
-
                 </tbody>
-
             </table>
-
         </div>
 
-
-        <!-- =====================================================
-             PAGINATION
-        ====================================================== -->
-
+        <?php if ($totalRecords > 0): ?>
         <div class="table-pagination">
-
             <div class="pagination-info">
-
                 Menampilkan
-
-                <strong>
-
-                    <?= $totalRecords > 0
-                        ? $offset + 1
-                        : 0 ?>
-
-                    -
-
-                    <?= min(
-                        $offset +
-                        count($pageData),
-                        $totalRecords
-                    ) ?>
-
-                </strong>
-
+                <strong><?= $offset + 1 ?> - <?= min($offset + count($pageData), $totalRecords) ?></strong>
                 dari
-
-                <strong>
-                    <?= $totalRecords ?>
-                </strong>
-
+                <strong><?= $totalRecords ?></strong>
                 data
-
             </div>
 
-
             <ul class="pagination-controls">
-
                 <li>
-
-                    <?php if ($page > 1): ?>
-
-                        <a
-                            href="<?= htmlspecialchars(
-                                buildPengkinianPageUrl(
-                                    $page - 1
-                                ),
-                                ENT_QUOTES,
-                                'UTF-8'
-                            ) ?>"
-                            class="page-btn"
-                        >
-                            &lsaquo; Sebelumnya
-                        </a>
-
-                    <?php else: ?>
-
-                        <span
-                            class="
-                                page-btn
-                                disabled
-                            "
-                        >
-                            &lsaquo; Sebelumnya
-                        </span>
-
-                    <?php endif; ?>
-
+                    <a href="<?= $page > 1 ? htmlspecialchars(buildPengkinianPageUrl($page - 1), ENT_QUOTES, 'UTF-8') : '#' ?>" class="page-btn <?= $page <= 1 ? 'disabled' : '' ?>">
+                        &lsaquo; Sebelumnya
+                    </a>
                 </li>
+                <?php
+                $visibleRange = 5;
+                $startPage = max(1, $page - 2);
+                $endPage = min($totalPages, $startPage + $visibleRange - 1);
+                if ($endPage - $startPage + 1 < $visibleRange) {
+                    $startPage = max(1, $endPage - $visibleRange + 1);
+                }
 
-
+                if ($startPage > 1) {
+                    echo '<li><a href="' . htmlspecialchars(buildPengkinianPageUrl(1), ENT_QUOTES, 'UTF-8') . '" class="page-btn">1</a></li>';
+                    if ($startPage > 2) {
+                        echo '<li><span class="page-ellipsis">&hellip;</span></li>';
+                    }
+                }
+                for ($i = $startPage; $i <= $endPage; $i++) {
+                    $activeClass = $i === $page ? 'active' : '';
+                    echo '<li><a href="' . htmlspecialchars(buildPengkinianPageUrl($i), ENT_QUOTES, 'UTF-8') . '" class="page-btn ' . $activeClass . '">' . $i . '</a></li>';
+                }
+                if ($endPage < $totalPages) {
+                    if ($endPage < $totalPages - 1) {
+                        echo '<li><span class="page-ellipsis">&hellip;</span></li>';
+                    }
+                    echo '<li><a href="' . htmlspecialchars(buildPengkinianPageUrl($totalPages), ENT_QUOTES, 'UTF-8') . '" class="page-btn">' . $totalPages . '</a></li>';
+                }
+                ?>
                 <li>
-
-                    <span
-                        class="
-                            page-btn
-                            active
-                        "
-                    >
-                        <?= $page ?>
-                    </span>
-
+                    <a href="<?= $page < $totalPages ? htmlspecialchars(buildPengkinianPageUrl($page + 1), ENT_QUOTES, 'UTF-8') : '#' ?>" class="page-btn <?= $page >= $totalPages ? 'disabled' : '' ?>">
+                        Selanjutnya &rsaquo;
+                    </a>
                 </li>
-
-
-                <li>
-
-                    <?php if (
-                        $page < $totalPages
-                    ): ?>
-
-                        <a
-                            href="<?= htmlspecialchars(
-                                buildPengkinianPageUrl(
-                                    $page + 1
-                                ),
-                                ENT_QUOTES,
-                                'UTF-8'
-                            ) ?>"
-                            class="page-btn"
-                        >
-                            Selanjutnya &rsaquo;
-                        </a>
-
-                    <?php else: ?>
-
-                        <span
-                            class="
-                                page-btn
-                                disabled
-                            "
-                        >
-                            Selanjutnya &rsaquo;
-                        </span>
-
-                    <?php endif; ?>
-
-                </li>
-
             </ul>
-
         </div>
-
+        <?php endif; ?>
     </div>
-
 </main>
 
-
-<!-- =============================================================
-     MODAL IMPORT EXCEL / CSV
-============================================================== -->
-
-<div
-    id="importPengkinianModal"
-    style="
-        display:none;
-        position:fixed;
-        inset:0;
-        background:rgba(0,0,0,.45);
-        z-index:9999;
-        align-items:center;
-        justify-content:center;
-        padding:20px;
-    "
->
-
-    <div
-        style="
-            background:#fff;
-            width:100%;
-            max-width:500px;
-            border-radius:10px;
-            padding:24px;
-            box-shadow:0 10px 40px rgba(0,0,0,.2);
-        "
-    >
-
-        <div
-            style="
-                display:flex;
-                justify-content:space-between;
-                align-items:center;
-                margin-bottom:20px;
-            "
-        >
-
-            <h3 style="margin:0;">
-                Import Data Pengkinian
-            </h3>
-
-            <button
-                type="button"
-                onclick="closeImportPengkinian()"
-                style="
-                    border:0;
-                    background:none;
-                    font-size:22px;
-                    cursor:pointer;
-                "
-            >
-                &times;
-            </button>
-
+<!-- MODAL RESET KONFIRMASI -->
+<div id="resetModal" style="display:none;position:fixed;inset:0;background:rgba(15,23,42,0.6);z-index:9999;align-items:center;justify-content:center;padding:20px;">
+    <div style="background:#ffffff;border-radius:10px;max-width:440px;width:100%;padding:24px;box-shadow:0 20px 25px -5px rgba(0,0,0,0.2);">
+        <h3 style="margin:0 0 10px;font-size:18px;color:#0f172a;font-weight:700;">Konfirmasi Reset Data</h3>
+        <p style="margin:0 0 20px;font-size:14px;color:#475569;line-height:1.5;">
+            Apakah Anda yakin ingin mereset seluruh data Pengkinian Data? Seluruh baris yang tersimpan akan dihapus secara permanen.
+        </p>
+        <div style="display:flex;justify-content:flex-end;gap:10px;">
+            <button type="button" class="btn btn-secondary" onclick="closeResetModal()">Batal</button>
+            <button type="button" class="btn btn-danger" id="btnConfirmReset" onclick="executeResetPengkinian()">Ya, Hapus Semua</button>
         </div>
-
-
-        <div
-            style="
-                padding:20px;
-                background:#f8f9fa;
-                border-radius:8px;
-                text-align:center;
-                margin-bottom:20px;
-            "
-        >
-
-            <p style="margin-top:0;">
-
-                Pilih file data yang akan
-                diimport.
-
-            </p>
-
-            <p
-                style="
-                    color:#777;
-                    font-size:13px;
-                    margin-bottom:0;
-                "
-            >
-
-                Format yang didukung:
-
-                <strong>
-                    Excel (.xlsx, .xls)
-                </strong>
-
-                atau
-
-                <strong>
-                    CSV (.csv)
-                </strong>
-
-            </p>
-
-        </div>
-
-
-        <div
-            id="selectedImportFile"
-            style="
-                display:none;
-                padding:12px;
-                background:#f1f5f9;
-                border-radius:6px;
-                margin-bottom:20px;
-                font-size:14px;
-            "
-        ></div>
-
-
-        <div
-            style="
-                display:flex;
-                justify-content:flex-end;
-                gap:10px;
-            "
-        >
-
-            <button
-                type="button"
-                class="btn btn-secondary"
-                onclick="closeImportPengkinian()"
-            >
-                Batal
-            </button>
-
-            <button
-                type="button"
-                class="btn btn-primary"
-                onclick="chooseImportFile()"
-            >
-                Pilih File
-            </button>
-
-        </div>
-
     </div>
-
 </div>
 
-
-<!-- =============================================================
-     JAVASCRIPT IMPORT
-============================================================== -->
-
 <script>
-
-function openImportPengkinian() {
-
-    const modal = document.getElementById(
-        'importPengkinianModal'
-    );
-
-    if (modal) {
-
-        modal.style.display = 'flex';
-
+document.addEventListener('DOMContentLoaded', function () {
+    const checkAll = document.getElementById('checkAllPengkinian');
+    if (checkAll) {
+        checkAll.addEventListener('change', function () {
+            const checkboxes = document.querySelectorAll('.pengkinian-check');
+            checkboxes.forEach(function (checkbox) {
+                checkbox.checked = checkAll.checked;
+            });
+            updateBulkActionState();
+        });
     }
+});
 
+function updateBulkActionState() {
+    const checked = document.querySelectorAll('.pengkinian-check:checked');
+    const bulkDiv = document.getElementById('bulkActions');
+    const countText = document.getElementById('selectedCountText');
+    if (!bulkDiv || !countText) return;
+
+    if (checked.length > 0) {
+        bulkDiv.style.display = 'flex';
+        countText.textContent = checked.length + ' data dipilih';
+    } else {
+        bulkDiv.style.display = 'none';
+    }
 }
 
-
-function closeImportPengkinian() {
-
-    const modal = document.getElementById(
-        'importPengkinianModal'
-    );
-
-    if (modal) {
-
-        modal.style.display = 'none';
-
-    }
-
+function openResetModal() {
+    const modal = document.getElementById('resetModal');
+    if (modal) modal.style.display = 'flex';
 }
 
-
-function chooseImportFile() {
-
-    const fileInput = document.getElementById(
-        'fileImportPengkinian'
-    );
-
-    if (fileInput) {
-
-        fileInput.click();
-
-    }
-
+function closeResetModal() {
+    const modal = document.getElementById('resetModal');
+    if (modal) modal.style.display = 'none';
 }
 
-
-function handleImportPengkinian(input) {
-
-    const selectedFile =
-        document.getElementById(
-            'selectedImportFile'
-        );
-
-    if (
-        !input.files ||
-        input.files.length === 0
-    ) {
-
-        return;
-
+async function executeResetPengkinian() {
+    const btn = document.getElementById('btnConfirmReset');
+    if (btn) {
+        btn.disabled = true;
+        btn.textContent = 'Menghapus...';
     }
 
-
-    const file = input.files[0];
-
-
-    const allowedExtensions = [
-        'xlsx',
-        'xls',
-        'csv'
-    ];
-
-    const fileName =
-        file.name.toLowerCase();
-
-    const extension =
-        fileName.split('.').pop();
-
-
-    if (
-        !allowedExtensions.includes(
-            extension
-        )
-    ) {
-
-        alert(
-            'Format file tidak didukung. ' +
-            'Silakan pilih file Excel atau CSV.'
-        );
-
-        input.value = '';
-
-        return;
-
-    }
-
-
-    if (selectedFile) {
-
-        selectedFile.style.display =
-            'block';
-
-        selectedFile.innerHTML =
-            '<strong>File dipilih:</strong> ' +
-            escapeHtml(file.name);
-
-    }
-
-}
-
-
-function escapeHtml(value) {
-
-    const div =
-        document.createElement('div');
-
-    div.textContent = value;
-
-    return div.innerHTML;
-
-}
-
-
-window.addEventListener(
-    'click',
-    function(event) {
-
-        const modal =
-            document.getElementById(
-                'importPengkinianModal'
-            );
-
-        if (
-            modal &&
-            event.target === modal
-        ) {
-
-            modal.style.display = 'none';
-
+    try {
+        const response = await fetch('api/pengkinian-data.php?action=clear', { method: 'POST' });
+        const result = await response.json();
+        if (!result.success) {
+            alert(result.message || 'Gagal mereset data.');
+            return;
         }
-
+        window.location.reload();
+    } catch (err) {
+        alert('Terjadi kesalahan saat mereset data.');
+    } finally {
+        if (btn) {
+            btn.disabled = false;
+            btn.textContent = 'Ya, Hapus Semua';
+        }
     }
-);
+}
 
+async function deleteSelectedPengkinian() {
+    const checked = Array.from(document.querySelectorAll('.pengkinian-check:checked')).map(cb => cb.value);
+    if (!checked.length) {
+        alert('Pilih setidaknya satu data yang ingin dihapus.');
+        return;
+    }
+
+    if (!confirm('Apakah Anda yakin ingin menghapus ' + checked.length + ' data terpilih?')) {
+        return;
+    }
+
+    try {
+        const response = await fetch('api/pengkinian-data.php?action=delete', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ ids: checked })
+        });
+        const result = await response.json();
+        if (!result.success) {
+            alert(result.message || 'Gagal menghapus data.');
+            return;
+        }
+        window.location.reload();
+    } catch (err) {
+        alert('Terjadi kesalahan saat menghapus data terpilih.');
+    }
+}
+
+async function deleteSinglePengkinian(id) {
+    if (!id) return;
+    if (!confirm('Apakah Anda yakin ingin menghapus data baris ini secara permanen?')) {
+        return;
+    }
+
+    try {
+        const response = await fetch('api/pengkinian-data.php?action=delete', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ ids: [id] })
+        });
+        const result = await response.json();
+        if (!result.success) {
+            alert(result.message || 'Gagal menghapus data.');
+            return;
+        }
+        window.location.reload();
+    } catch (err) {
+        alert('Terjadi kesalahan saat menghapus data.');
+    }
+}
 </script>
 
-
-<?php
-require_once __DIR__ . '/includes/footer.php';
-?>
+<?php require_once __DIR__ . '/includes/footer.php'; ?>
